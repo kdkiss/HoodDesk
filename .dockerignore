@@ -1,0 +1,16 @@
+Dockerfile
+.dockerignore
+node_modules
+npm-debug.log
+.env
+.env.*
+!.env.example
+README.md
+.next
+.git
+.vscode
+.claude
+dev.db
+dev.db-journal
+tests
+HOODDESK_KIMI_BUILD_PROMPT.md

@@ -1,0 +1,235 @@
+/* stylelint-disable */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --hood-bg: 13 14 17;
+  --hood-panel: 21 23 28;
+  --hood-well: 27 30 36;
+  --hood-border: 35 38 46;
+  --hood-border-light: 46 50 60;
+  --hood-text: 232 234 238;
+  --hood-muted: 139 145 158;
+  --hood-green: 0 209 143;
+  --hood-green-dim: 10 46 35;
+  --hood-amber: 217 119 6;
+  --hood-amber-dim: 42 31 4;
+  --hood-red: 246 70 93;
+  --hood-red-dim: 51 21 27;
+  --hood-yellow: 240 185 11;
+  --background: rgb(var(--hood-bg));
+  --foreground: rgb(var(--hood-text));
+}
+
+html.light {
+  --hood-bg: 246 248 251;
+  --hood-panel: 255 255 255;
+  --hood-well: 238 242 247;
+  --hood-border: 211 219 229;
+  --hood-border-light: 179 190 204;
+  --hood-text: 20 27 38;
+  --hood-muted: 84 98 117;
+  --hood-green: 0 145 96;
+  --hood-green-dim: 220 247 237;
+  --hood-amber: 181 101 0;
+  --hood-amber-dim: 255 243 214;
+  --hood-red: 206 47 68;
+  --hood-red-dim: 255 230 234;
+  --hood-yellow: 174 118 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Instrument-panel vignette: a soft green-tinged edge glow suggesting
+     a gently-lit desk surface at night. Only visible as a warmth shift
+     against the near-black canvas. */
+  background-image: radial-gradient(ellipse 80% 60% at 50% 20%, rgb(var(--hood-green) / 0.05) 0%, transparent 100%);
+  background-attachment: fixed;
+}
+
+.font-mono {
+  font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+@layer components {
+  /* Shared primitives — keep class-composition in pages minimal and consistent. */
+
+  .hd-card {
+    @apply bg-hood-panel border border-hood-border rounded-2xl shadow-card;
+  }
+
+  .hd-input {
+    @apply bg-hood-well border border-transparent rounded-xl px-4 py-3 text-[15px] text-hood-text placeholder:text-hood-muted/50 focus:outline-none focus:border-hood-green/40 focus:ring-2 focus:ring-hood-green/20 transition-all shadow-inner;
+  }
+
+  .hd-btn-primary {
+    @apply bg-hood-green text-black font-bold text-lg rounded-2xl px-4 py-3.5 transition-all hover:brightness-110 hover:shadow-glow active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-hood-green/50 focus-visible:ring-offset-2 focus-visible:ring-offset-hood-bg;
+  }
+
+  .hd-btn-secondary {
+    @apply bg-hood-well text-hood-text font-semibold rounded-xl px-4 py-2.5 border border-hood-border transition-all hover:border-hood-borderLight hover:bg-hood-border/40 active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-hood-green/30;
+  }
+
+  .hd-btn-ghost {
+    @apply border border-hood-border text-hood-muted rounded-lg px-4 py-2 transition-colors hover:text-hood-text hover:border-hood-borderLight active:scale-[0.99] disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-hood-green/30;
+  }
+
+  /* Chip-style button used in tab bars and filters. */
+  .hd-chip {
+    @apply px-2.5 py-1 text-[11px] rounded-lg font-medium transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-hood-green/30;
+  }
+  .hd-chip--active {
+    @apply hd-chip bg-hood-green text-black shadow-sm;
+  }
+  .hd-chip--idle {
+    @apply hd-chip text-hood-muted hover:text-hood-text;
+  }
+
+  .hd-badge {
+    @apply inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold tracking-wide;
+  }
+
+  .hd-badge-green {
+    @apply hd-badge bg-hood-greenDim text-hood-green;
+  }
+
+  .hd-badge-amber {
+    @apply hd-badge bg-hood-amberDim text-hood-amber;
+  }
+
+  .hd-badge-yellow {
+    @apply hd-badge bg-yellow-500/15 text-hood-yellow;
+  }
+
+  .hd-badge-red {
+    @apply hd-badge bg-hood-redDim text-hood-red;
+  }
+
+  .hd-badge-muted {
+    @apply hd-badge bg-hood-well text-hood-muted border border-hood-border;
+  }
+
+  .hd-table {
+    @apply w-full text-sm;
+  }
+
+  .hd-table thead tr {
+    @apply text-left text-hood-muted border-b border-hood-border text-xs uppercase tracking-wide;
+  }
+
+  .hd-table th {
+    @apply px-3 py-3 font-medium whitespace-nowrap;
+  }
+
+  .hd-table tbody tr {
+    @apply border-b border-hood-border/60 transition-colors hover:bg-hood-well/50;
+  }
+
+  .hd-table td {
+    @apply px-3 py-3;
+  }
+
+  .hd-page {
+    @apply p-6 max-w-7xl mx-auto;
+  }
+
+  .hd-h1 {
+    @apply text-xl font-bold tracking-tight;
+  }
+
+  .hd-error {
+    @apply bg-hood-redDim border border-hood-red/40 text-hood-red px-3 py-2 rounded-lg text-sm;
+  }
+
+  .hd-link {
+    @apply text-hood-green hover:underline;
+  }
+}
+
+/* Instrument-label style for status indicators */
+.instrument-dot {
+  @apply inline-block rounded-full;
+  width: 6px;
+  height: 6px;
+}
+.instrument-dot--green { @apply bg-hood-green; }
+.instrument-dot--amber { @apply bg-hood-amber; }
+.instrument-dot--red { @apply bg-hood-red; }
+
+/* Slim scrollbars to match the trading terminal aesthetic. */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--hood-border));
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--hood-border-light));
+}
+
+/* A small number of third-party-style controls still use Tailwind's white
+   utility. Keep their text legible when the user switches to light mode. */
+html.light .text-white,
+html.light .hover\:text-white:hover {
+  color: rgb(var(--hood-text));
+}
+
+/* Smooth transition for all interactive elements */
+button, a, input, select, textarea {
+  transition-property: color, background-color, border-color, box-shadow, opacity;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Subtle pulse animation for loading states */
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.animate-pulse-soft {
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+
+/* Fade-in for panels */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+/* Number inputs: hide spinners for cleaner look */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* Select dropdown styling */
+select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b919e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 32px;
+}

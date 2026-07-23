@@ -1,0 +1,133 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model AutomatedOrder {
+  id                    String           @id @default(cuid())
+  ownerAddress          String
+  executionWallet       String
+  chainId               Int
+  dexAdapterId          String
+  tokenIn               String
+  tokenOut              String
+  amountIn              String
+  triggerPrice          String?
+  triggerDirection      String? // "gte" | "lte"
+  orderType             String // "LIMIT_BUY" | "TAKE_PROFIT" | "STOP_LOSS" | "DCA" | "BRIDGE" | "CROSS_CHAIN"
+  orderSubtype          String? // "DAILY" | "WEEKLY" | "MONTHLY" for DCA; destination chain id for bridge/cross-chain
+  maximumSlippageBps    Int
+  maximumPriceImpactBps Int
+  deadlineSeconds       Int
+  maximumGasPriceGwei   String?
+  expiresAt             DateTime?
+  status                String // "ARMED" | "PAUSED" | "EXECUTING" | "CONFIRMED" | "FAILED" | "CANCELLED" | "COMPLETED"
+  transactionHash       String?
+  failureReason         String?
+  retryCount            Int              @default(0)
+  triggeredAt           DateTime?
+  executedAt            DateTime?
+  metadata              Json? // DCA: { totalAmount, totalIterations, currentIteration, startAt }; Bridge/Cross-Chain: { destinationChainId, gasOnDestination }
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  executions            OrderExecution[]
+  events                OrderEvent[]
+
+  @@index([ownerAddress, chainId])
+  @@index([chainId, status])
+}
+
+model OrderExecution {
+  id                String         @id @default(cuid())
+  orderId           String
+  attempt           Int
+  quoteBlockNumber  String?
+  expectedOutput    String
+  minimumOutput     String
+  transactionHash   String?
+  nonce             String?
+  gasEstimate       String?
+  gasUsed           String?
+  effectiveGasPrice String?
+  status            String // "PENDING" | "CONFIRMED" | "FAILED"
+  errorCode         String?
+  errorMessage      String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  order             AutomatedOrder @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+model OrderEvent {
+  id        String         @id @default(cuid())
+  orderId   String
+  eventType String // "CREATED" | "TRIGGERED" | "EXECUTING" | "CONFIRMED" | "FAILED" | "CANCELLED" | "ITERATION_COMPLETED"
+  message   String?
+  metadata  Json?
+  createdAt DateTime       @default(now())
+  order     AutomatedOrder @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+model TrackedTransaction {
+  id              String   @id @default(cuid())
+  walletAddress   String
+  chainId         Int
+  transactionHash String   @unique
+  transactionType String
+  status          String
+  blockNumber     String?
+  gasUsed         String?
+  metadata        Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model Watchlist {
+  id           String   @id @default(cuid())
+  ownerAddress String
+  tokenAddress String
+  chainId      Int
+  createdAt    DateTime @default(now())
+
+  @@unique([ownerAddress, tokenAddress, chainId])
+}
+
+model TokenMetadata {
+  id             String   @id @default(cuid())
+  address        String   @unique
+  chainId        Int
+  name           String
+  symbol         String
+  decimals       Int
+  creator        String?
+  isRobinFun     Boolean  @default(false)
+  dexLive        Boolean  @default(false)
+  pairAddress    String?
+  exchangeRate   String?
+  holdersCount   Int?
+  totalSupply    String?
+  factoryAddress String?
+  lastUpdated    DateTime @updatedAt
+  createdAt      DateTime @default(now())
+
+  @@index([chainId, isRobinFun])
+  @@index([factoryAddress])
+}
+
+model UsedAuthorization {
+  id           String   @id @default(cuid())
+  digest       String   @unique
+  ownerAddress String
+  action       String
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([expiresAt])
+}

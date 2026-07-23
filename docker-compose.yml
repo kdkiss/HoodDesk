@@ -1,0 +1,21 @@
+services:
+  web:
+    build:
+      context: .
+      target: web
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./prisma:/app/prisma
+
+  worker:
+    build:
+      context: .
+      target: worker
+    env_file:
+      - .env
+    volumes:
+      - ./prisma:/app/prisma
+    command: sh -c "npx prisma migrate deploy && npm run worker:start"
