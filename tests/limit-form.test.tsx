@@ -89,6 +89,25 @@ it("shows last price in ETH per token and can fill the trigger price", async () 
   expect(screen.getByText(/not USD/)).toBeInTheDocument();
 });
 
+it("fills take-profit trigger prices above the last price", async () => {
+  const user = userEvent.setup();
+  render(<LimitForm />);
+
+  await user.click(screen.getByRole("button", { name: "Take Profit" }));
+  await user.click(screen.getByRole("button", { name: "+10%" }));
+
+  expect(screen.getByLabelText("Trigger Price (ETH per token)")).toHaveValue("0.00013255");
+});
+
+it("fills limit-buy trigger prices below the last price", async () => {
+  const user = userEvent.setup();
+  render(<LimitForm />);
+
+  await user.click(screen.getByRole("button", { name: "-5%" }));
+
+  expect(screen.getByLabelText("Trigger Price (ETH per token)")).toHaveValue("0.000114475");
+});
+
 it("opens token picker on button click", async () => {
   const user = userEvent.setup();
   render(<LimitForm />);

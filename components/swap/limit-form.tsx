@@ -37,6 +37,11 @@ function formatLastPrice(value: string) {
   return numeric.toLocaleString(undefined, { maximumFractionDigits: 12 });
 }
 
+function formatTriggerPriceValue(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return value.toFixed(18).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } = {}) {
   const { address } = useAccount();
   const { signMessageAsync } = useSignMessage();
@@ -53,6 +58,7 @@ export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } 
   const pricedTokenAddress = pricedToken && !pricedToken.isNative ? pricedToken.address : "";
   const tokenStatsQuery = useTokenStats(pricedTokenAddress);
   const lastPriceEth = tokenStatsQuery.data?.priceEth;
+  const triggerPriceOffsets = orderType === "TAKE_PROFIT" ? [5, 10, 25] : [-5, -10, -25];
 
   // Initialize the fixed token on the side that matches the selected order type.
   useEffect(() => {
@@ -120,6 +126,13 @@ export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } 
     if (!sellBalance || sellBalance <= 0n) return;
     const value = (sellBalance * BigInt(percent)) / 100n;
     setAmount(formatDisplayAmount(value, sellToken.decimals));
+  }
+
+  function applyTriggerPriceOffset(percent: number) {
+    if (!lastPriceEth) return;
+    const lastPrice = Number(lastPriceEth);
+    if (!Number.isFinite(lastPrice) || lastPrice <= 0) return;
+    setTriggerPrice(formatTriggerPriceValue(lastPrice * (1 + percent / 100)));
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -287,6 +300,20 @@ export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } 
         <p className="mt-1 text-xs text-hood-muted">
           Limit triggers use ETH per token, not USD. The latest USD estimate can differ with ETH/USD.
         </p>
+        {lastPriceEth && (
+          <div className="mt-2 grid grid-cols-3 gap-1.5">
+            {triggerPriceOffsets.map((percent) => (
+              <button
+                key={percent}
+                type="button"
+                onClick={() => applyTriggerPriceOffset(percent)}
+                className="rounded-lg border border-hood-border bg-hood-well px-2 py-1.5 text-[11px] font-semibold text-hood-muted transition-colors hover:border-hood-green/40 hover:text-hood-text"
+              >
+                {percent > 0 ? `+${percent}%` : `${percent}%`}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div>
