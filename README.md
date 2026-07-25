@@ -104,6 +104,7 @@ To stop HoodDesk, run `docker compose down` from the `HoodDesk` folder. Your loc
 ### Docker troubleshooting
 
 - If `docker` is “not recognized” or Docker cannot connect, open Docker Desktop, wait until it reports that it is running, then retry.
+- If automated order creation fails with `Unable to verify authorization` and the web logs mention `attempt to write a readonly database`, restart with `docker compose up -d --build`. HoodDesk includes a small startup permission fix for the local SQLite database in `prisma/dev.db`.
 - If [http://localhost:3000](http://localhost:3000) is unavailable, run `docker compose ps` to check that the containers are running. Another app may already be using port 3000.
 - Never share your `.env` file, wallet recovery phrase, private key, or API keys.
 
