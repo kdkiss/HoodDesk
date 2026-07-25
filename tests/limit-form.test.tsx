@@ -7,6 +7,8 @@ const signMessageAsync = vi.fn().mockResolvedValue("0xfakesig");
 
 vi.mock("wagmi", () => ({
   useAccount: () => ({ address: "0x1111111111111111111111111111111111111111", isConnected: true }),
+  useBalance: () => ({ data: { value: 10n ** 18n, decimals: 18, symbol: "ETH" } }),
+  useReadContract: () => ({ data: 4000n * 10n ** 18n }),
   useSignMessage: () => ({ signMessageAsync }),
 }));
 
@@ -16,6 +18,10 @@ vi.mock("@tanstack/react-query", () => ({
 
 vi.mock("@/components/trading/use-token-info", () => ({
   useTokenInfo: vi.fn(() => ({ data: undefined, isLoading: false })),
+}));
+
+vi.mock("@/components/trading/use-token-stats", () => ({
+  useTokenStats: vi.fn(() => ({ data: { priceEth: "0.0001205" }, isLoading: false })),
 }));
 
 vi.mock("@/components/swap/token-select-modal", () => ({
@@ -64,6 +70,23 @@ it("renders expiry quick buttons", () => {
   expect(screen.getByText("1h")).toBeInTheDocument();
   expect(screen.getByText("1d")).toBeInTheDocument();
   expect(screen.getByText("1w")).toBeInTheDocument();
+});
+
+it("renders percentage amount buttons and fills max balance", async () => {
+  const user = userEvent.setup();
+  render(<LimitForm />);
+
+  await user.click(screen.getByRole("button", { name: "Max" }));
+  expect(screen.getByLabelText("Amount")).toHaveValue("1");
+});
+
+it("shows last price in ETH per token and can fill the trigger price", async () => {
+  const user = userEvent.setup();
+  render(<LimitForm />);
+
+  await user.click(screen.getByRole("button", { name: /Use last:/ }));
+  expect(screen.getByLabelText("Trigger Price (ETH per token)")).toHaveValue("0.0001205");
+  expect(screen.getByText(/not USD/)).toBeInTheDocument();
 });
 
 it("opens token picker on button click", async () => {

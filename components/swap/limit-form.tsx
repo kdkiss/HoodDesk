@@ -2,11 +2,13 @@
 
 import { useState, useEffect } from "react";
 import { useTokenInfo } from "@/components/trading/use-token-info";
-import { useAccount, useSignMessage } from "wagmi";
-import { parseUnits } from "viem";
+import { useTokenStats } from "@/components/trading/use-token-stats";
+import { useAccount, useBalance, useReadContract, useSignMessage } from "wagmi";
+import { formatUnits, parseUnits, type Address } from "viem";
 import { TokenSelectModal, NATIVE_ETH, type SelectableToken } from "./token-select-modal";
 import { generateAuthMessage } from "@/src/lib/security/signature";
 import { WETH } from "@/src/config/contracts";
+import { ERC20_ABI } from "@/src/lib/dex/abi/erc20";
 
 type OrderType = "LIMIT_BUY" | "TAKE_PROFIT" | "STOP_LOSS";
 
@@ -19,6 +21,21 @@ const ORDER_TYPE_INFO: Record<OrderType, { label: string; direction: "gte" | "lt
 const DEFAULT_SLIPPAGE_BPS = 500;
 const MAX_PRICE_IMPACT_BPS = 800;
 const DEADLINE_SECONDS = 300;
+const EXPECTED_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 4663);
+
+function formatDisplayAmount(value: bigint, decimals: number) {
+  const formatted = formatUnits(value, decimals);
+  const [whole, fraction = ""] = formatted.split(".");
+  const trimmedFraction = fraction.slice(0, 8).replace(/0+$/, "");
+  return trimmedFraction ? `${whole}.${trimmedFraction}` : whole;
+}
+
+function formatLastPrice(value: string) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return value;
+  if (numeric < 0.000001) return numeric.toExponential(4);
+  return numeric.toLocaleString(undefined, { maximumFractionDigits: 12 });
+}
 
 export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } = {}) {
   const { address } = useAccount();
@@ -31,25 +48,79 @@ export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } 
   
   const tokenInfoQuery = useTokenInfo(fixedTokenAddress || "");
   const tokenInfo = tokenInfoQuery.data;
+  const isSellOrder = orderType !== "LIMIT_BUY";
+  const pricedToken = sellToken.isNative ? buyToken : sellToken;
+  const pricedTokenAddress = pricedToken && !pricedToken.isNative ? pricedToken.address : "";
+  const tokenStatsQuery = useTokenStats(pricedTokenAddress);
+  const lastPriceEth = tokenStatsQuery.data?.priceEth;
 
-  // Initialize buyToken if fixedTokenAddress is provided and loaded
+  // Initialize the fixed token on the side that matches the selected order type.
   useEffect(() => {
-    if (fixedTokenAddress && tokenInfo && !buyToken && tokenInfo.address.toLowerCase() === fixedTokenAddress.toLowerCase()) {
-      setBuyToken({
+    if (!fixedTokenAddress || !tokenInfo || tokenInfo.address.toLowerCase() !== fixedTokenAddress.toLowerCase()) return;
+
+    const fixedToken = {
         address: tokenInfo.address,
         name: tokenInfo.name,
         symbol: tokenInfo.symbol,
         decimals: tokenInfo.decimals,
         dexLive: tokenInfo.dexLive,
-      });
+    };
+
+    if (isSellOrder) {
+      if (sellToken.address.toLowerCase() !== fixedToken.address.toLowerCase()) setSellToken(fixedToken);
+      if (!buyToken?.isNative) setBuyToken(NATIVE_ETH);
+    } else if (!buyToken || buyToken.address.toLowerCase() !== fixedToken.address.toLowerCase()) {
+      setSellToken(NATIVE_ETH);
+      setBuyToken(fixedToken);
     }
-  }, [fixedTokenAddress, tokenInfo, buyToken]);
+  }, [fixedTokenAddress, tokenInfo, buyToken, sellToken.address, isSellOrder]);
+
   const [triggerPrice, setTriggerPrice] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [pickerSide, setPickerSide] = useState<"sell" | "buy" | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  const nativeBalance = useBalance({
+    address: address as Address | undefined,
+    chainId: EXPECTED_CHAIN_ID,
+    query: { enabled: Boolean(address && sellToken.isNative) },
+  });
+
+  const erc20Balance = useReadContract({
+    address: !sellToken.isNative && sellToken.address ? (sellToken.address as Address) : undefined,
+    abi: ERC20_ABI,
+    functionName: "balanceOf",
+    args: address ? [address as Address] : undefined,
+    chainId: EXPECTED_CHAIN_ID,
+    query: { enabled: Boolean(address && !sellToken.isNative && sellToken.address) },
+  });
+
+  const sellBalance = sellToken.isNative
+    ? nativeBalance.data?.value
+    : (erc20Balance.data as bigint | undefined);
+
+  function selectOrderType(nextType: OrderType) {
+    setOrderType(nextType);
+    const nextIsSellOrder = nextType !== "LIMIT_BUY";
+
+    if (nextIsSellOrder && sellToken.isNative && buyToken && !buyToken.isNative) {
+      setSellToken(buyToken);
+      setBuyToken(NATIVE_ETH);
+      setAmount("");
+    } else if (!nextIsSellOrder && !sellToken.isNative && buyToken?.isNative) {
+      setBuyToken(sellToken);
+      setSellToken(NATIVE_ETH);
+      setAmount("");
+    }
+  }
+
+  function applyBalancePercent(percent: number) {
+    if (!sellBalance || sellBalance <= 0n) return;
+    const value = (sellBalance * BigInt(percent)) / 100n;
+    setAmount(formatDisplayAmount(value, sellToken.decimals));
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,7 +180,7 @@ export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } 
             <button
               key={t}
               type="button"
-              onClick={() => setOrderType(t)}
+              onClick={() => selectOrderType(t)}
               className={`px-3 py-2 rounded-xl text-xs font-semibold transition-all active:scale-[0.98] ${
                 orderType === t
                   ? "bg-hood-green text-black shadow-sm"
@@ -149,9 +220,17 @@ export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } 
       </div>
 
       <div>
-        <label className="text-sm text-hood-muted mb-1 block">Amount</label>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label className="text-sm text-hood-muted block">Amount</label>
+          {sellBalance !== undefined && (
+            <span className="text-[11px] text-hood-muted font-mono truncate">
+              Balance: {formatDisplayAmount(sellBalance, sellToken.decimals)} {sellToken.symbol}
+            </span>
+          )}
+        </div>
         <input
           type="text"
+          aria-label="Amount"
           inputMode="decimal"
           value={amount}
           onChange={(e) => {
@@ -163,23 +242,51 @@ export function LimitForm({ fixedTokenAddress }: { fixedTokenAddress?: string } 
           step="any"
           className="hd-input w-full"
         />
+        <div className="mt-2 grid grid-cols-4 gap-1.5">
+          {[25, 50, 75, 100].map((percent) => (
+            <button
+              key={percent}
+              type="button"
+              onClick={() => applyBalancePercent(percent)}
+              disabled={!sellBalance || sellBalance <= 0n}
+              className="rounded-lg border border-hood-border bg-hood-well px-2 py-1.5 text-[11px] font-semibold text-hood-muted transition-colors hover:border-hood-green/40 hover:text-hood-text disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {percent === 100 ? "Max" : `${percent}%`}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div>
-        <label className="text-sm text-hood-muted mb-1 block">Trigger Price</label>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label className="text-sm text-hood-muted block">Trigger Price (ETH per token)</label>
+          {lastPriceEth && (
+            <button
+              type="button"
+              onClick={() => setTriggerPrice(lastPriceEth)}
+              className="text-[11px] font-semibold text-hood-green hover:text-hood-green/80"
+            >
+              Use last: {formatLastPrice(lastPriceEth)}
+            </button>
+          )}
+        </div>
         <input
           type="text"
+          aria-label="Trigger Price (ETH per token)"
           inputMode="decimal"
           value={triggerPrice}
           onChange={(e) => {
             const value = e.target.value;
             if (value === "" || /^\d*\.?\d*$/.test(value)) setTriggerPrice(value);
           }}
-          placeholder="0.0"
+          placeholder={lastPriceEth ? formatLastPrice(lastPriceEth) : "0.0"}
           min="0"
           step="any"
           className="hd-input w-full"
         />
+        <p className="mt-1 text-xs text-hood-muted">
+          Limit triggers use ETH per token, not USD. The latest USD estimate can differ with ETH/USD.
+        </p>
       </div>
 
       <div>

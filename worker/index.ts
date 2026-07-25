@@ -6,6 +6,7 @@ import { UNISWAP_V2_ROUTER_ABI } from "../src/lib/dex/abi/uniswap-v2-router";
 import { ERC20_ABI } from "../src/lib/dex/abi/erc20";
 import { ROBINFUN_FACTORIES, DEX_ROUTER, WETH } from "../src/config/contracts";
 import { getChain } from "../src/config/chains";
+import { priceEthPerTokenFromReserves } from "../src/lib/price-units";
 import { runTokenDiscovery } from "./token-discovery";
 
 const EXECUTION_ENABLED = process.env.EXECUTION_ENABLED === "true";
@@ -212,14 +213,48 @@ export async function processOrder(order: {
   let currentPrice: bigint;
 
   if (graduated) {
-    // Get price from V2 router
-    const amounts = await publicClient.readContract({
-      address: DEX_ROUTER,
-      abi: UNISWAP_V2_ROUTER_ABI,
-      functionName: "getAmountsOut",
-      args: [parseEther("1"), [WETH, token]],
-    });
-    currentPrice = amounts[1];
+    const pairAddress = meta?.pairAddress;
+    if (!pairAddress) throw new Error("Graduated token is missing pair address");
+
+    const [token0, reserves] = await Promise.all([
+      publicClient.readContract({
+        address: pairAddress as Address,
+        abi: [
+          {
+            type: "function",
+            name: "token0",
+            stateMutability: "view",
+            inputs: [],
+            outputs: [{ name: "", type: "address" }],
+          },
+        ] as const,
+        functionName: "token0",
+      }),
+      publicClient.readContract({
+        address: pairAddress as Address,
+        abi: [
+          {
+            type: "function",
+            name: "getReserves",
+            stateMutability: "view",
+            inputs: [],
+            outputs: [
+              { name: "reserve0", type: "uint112" },
+              { name: "reserve1", type: "uint112" },
+              { name: "blockTimestampLast", type: "uint32" },
+            ],
+          },
+        ] as const,
+        functionName: "getReserves",
+      }),
+    ]);
+    const [reserve0, reserve1] = reserves as [bigint, bigint, number];
+    const wethIsToken0 = (token0 as Address).toLowerCase() === WETH.toLowerCase();
+    const wethReserve = wethIsToken0 ? reserve0 : reserve1;
+    const tokenReserve = wethIsToken0 ? reserve1 : reserve0;
+    const price = priceEthPerTokenFromReserves(wethReserve, tokenReserve);
+    if (price === null) throw new Error("Graduated token has no token liquidity");
+    currentPrice = price;
   } else {
     // Get price from curve
     currentPrice = await publicClient.readContract({

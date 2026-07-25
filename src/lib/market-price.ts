@@ -1,6 +1,7 @@
 import { formatEther, type Address } from "viem";
 import { WETH } from "@/src/config/contracts";
 import { curveAdapter, v2Adapter } from "@/src/lib/dex";
+import { priceEthPerTokenFromReserves } from "@/src/lib/price-units";
 
 /**
  * Returns the current on-chain price in ETH per whole token.  We deliberately
@@ -23,9 +24,10 @@ export async function getLivePriceEth(
     const wethIsToken0 = reserves.token0.toLowerCase() === WETH.toLowerCase();
     const wethReserve = wethIsToken0 ? reserves.reserve0 : reserves.reserve1;
     const tokenReserve = wethIsToken0 ? reserves.reserve1 : reserves.reserve0;
-    if (tokenReserve === 0n) return null;
+    const price = priceEthPerTokenFromReserves(wethReserve, tokenReserve);
+    if (price === null) return null;
 
-    return formatEther((wethReserve * 10n ** 18n) / tokenReserve);
+    return formatEther(price);
   } catch {
     // A newly created or illiquid token can have no readable price yet.
     return null;
