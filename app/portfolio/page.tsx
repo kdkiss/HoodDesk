@@ -2,27 +2,11 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useAccount } from "wagmi";
-
-interface MoneyAmount {
-  wei: string;
-  eth: string;
-}
-
-interface Holding {
-  token: { address: string; name: string; symbol: string; decimals: number };
-  balanceFormatted: string;
-  estimatedMarketValue: string | null;
-  valueUsd: string | null;
-  trackedCostBasis: MoneyAmount | null;
-  realizedPnl: MoneyAmount | null;
-  unrealizedPnl: MoneyAmount | null;
-  costBasisUnavailable: boolean;
-}
-
-interface Portfolio {
-  ethBalanceFormatted: string;
-  holdings: Holding[];
-}
+import { PortfolioAnalystPanel } from "@/components/ai/portfolio-analyst-panel";
+import {
+  type PortfolioMoneyAmount,
+  type PortfolioResponse,
+} from "@/src/lib/portfolio/types";
 
 const STORAGE_KEY = "hooddesk-wallet-address";
 
@@ -32,7 +16,7 @@ function formatEth(value: string | null): string {
   return `${n.toFixed(6)} ETH`;
 }
 
-function PnlCell({ pnl }: { pnl: MoneyAmount | null }) {
+function PnlCell({ pnl }: { pnl: PortfolioMoneyAmount | null }) {
   if (!pnl) {
     return <span className="text-hood-muted">Unavailable</span>;
   }
@@ -50,7 +34,7 @@ function PnlCell({ pnl }: { pnl: MoneyAmount | null }) {
 export default function PortfolioPage() {
   const { address: connectedAddress } = useAccount();
   const [address, setAddress] = useState("");
-  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -135,6 +119,8 @@ export default function PortfolioPage() {
               {Number(portfolio.ethBalanceFormatted).toFixed(6)} <span className="text-lg text-hood-muted">ETH</span>
             </div>
           </div>
+
+          <PortfolioAnalystPanel portfolio={portfolio} />
 
           <div className="text-xs text-hood-muted max-w-3xl">
             Cost basis is derived only from trades executed or recorded through HoodDesk.

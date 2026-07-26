@@ -1,5 +1,6 @@
 # Base node image
 FROM node:22-alpine AS base
+RUN mkdir -p /app/data && chown 1001:1001 /app/data
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -65,11 +66,16 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
 # The worker uses tsx, so we need to bring all dependencies including devDependencies
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --chown=nextjs:nodejs . .
 
 # Generate Prisma Client
 RUN npx prisma generate
+
+USER nextjs
 
 CMD ["npm", "run", "worker:start"]

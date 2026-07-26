@@ -5,7 +5,10 @@ import { blockscoutGet } from "@/src/lib/blockscout/client";
 import { prisma } from "@/src/lib/db";
 import { type Address } from "viem";
 import { checkRateLimit, RATE_LIMITS } from "@/src/lib/security/rate-limit";
-import { getLivePriceEth } from "@/src/lib/market-price";
+import {
+  getLivePriceEth,
+  getPriceChanges24h,
+} from "@/src/lib/market-price";
 
 const querySchema = z.object({
   address: z.string().optional(),
@@ -15,7 +18,11 @@ const querySchema = z.object({
 
 type MarketToken = Awaited<ReturnType<typeof prisma.tokenMetadata.findFirst>>;
 
-async function addLivePrices<T extends NonNullable<MarketToken>>(tokens: T[]): Promise<Array<T & { priceEth: string | null }>> {
+async function addLivePrices<T extends NonNullable<MarketToken>>(
+  tokens: T[]
+): Promise<
+  Array<T & { priceEth: string | null; change24hPct: number | null }>
+> {
   const results: Array<T & { priceEth: string | null }> = [];
   const concurrency = 8;
   let cursor = 0;
@@ -34,7 +41,14 @@ async function addLivePrices<T extends NonNullable<MarketToken>>(tokens: T[]): P
   }
 
   await Promise.all(Array.from({ length: Math.min(concurrency, tokens.length) }, worker));
-  return results;
+  const changes = await getPriceChanges24h(
+    tokens,
+    results.map((token) => token.priceEth)
+  );
+  return results.map((token, index) => ({
+    ...token,
+    change24hPct: changes[index] ?? null,
+  }));
 }
 
 export async function GET(req: NextRequest) {
@@ -57,18 +71,16 @@ export async function GET(req: NextRequest) {
         where: { address: address.toLowerCase() },
       });
       if (cached) {
+        const [enriched] = await addLivePrices([cached]);
         return NextResponse.json({
-          token: {
-            ...cached,
-            priceEth: await getLivePriceEth(cached.address as Address, cached.dexLive, cached.pairAddress),
-          },
+          token: enriched,
         });
       }
 
       const token = await getTokenInfo(address as Address);
 
       // Cache in DB
-      await prisma.tokenMetadata.upsert({
+      const stored = await prisma.tokenMetadata.upsert({
         where: { address: token.address.toLowerCase() },
         update: {
           name: token.name,
@@ -92,11 +104,9 @@ export async function GET(req: NextRequest) {
         },
       });
 
+      const [enriched] = await addLivePrices([stored]);
       return NextResponse.json({
-        token: {
-          ...token,
-          priceEth: await getLivePriceEth(token.address as Address, token.dexLive, token.pairAddress),
-        },
+        token: enriched,
       });
     }
 
@@ -134,7 +144,14 @@ export async function GET(req: NextRequest) {
     // List all RobinFun tokens from DB
     const tokens = await prisma.tokenMetadata.findMany({
       where: { chainId, isRobinFun: true },
-      orderBy: { lastUpdated: "desc" },
+      // Discovery refreshes many records at nearly the same time, so
+      // lastUpdated alone makes the first page unstable. Keep graduated
+      // tokens visible, then use a deterministic address tie-breaker.
+      orderBy: [
+        { dexLive: "desc" },
+        { lastUpdated: "desc" },
+        { address: "asc" },
+      ],
       take: 100,
     });
 

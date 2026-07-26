@@ -10,4 +10,7 @@ We will acknowledge reports as soon as practical, investigate them, and coordina
 
 HoodDesk is experimental software. Automated execution is disabled by default and must only be enabled for a dedicated, funded execution wallet after a deployment-specific security review. Do not place a production private key in browser-accessible variables, source control, or container images.
 
-Run the public application behind HTTPS and a reverse proxy that normalizes client IP headers. Keep dependencies current and apply database migrations before starting the worker.
+Run the public application behind HTTPS and a reverse proxy that overwrites
+client IP headers. Set `TRUST_PROXY_HEADERS=true` only for that controlled
+topology. Keep dependencies current and apply database migrations before
+starting the worker.

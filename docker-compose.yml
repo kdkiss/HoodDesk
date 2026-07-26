@@ -1,34 +1,72 @@
 services:
-  db-permissions:
-    image: alpine:3.20
-    user: "0:0"
-    volumes:
-      - ./prisma:/data
-    command: sh -c "mkdir -p /data && chown -R 1001:1001 /data && chmod -R u+rwX,g+rwX /data"
-
   web:
     build:
       context: .
       target: web
-    depends_on:
-      db-permissions:
-        condition: service_completed_successfully
     ports:
       - "3000:3000"
-    env_file:
-      - .env
+    environment:
+      DATABASE_URL: file:/app/data/dev.db
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-HoodDesk}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-}
+      NEXT_PUBLIC_CHAIN_ID: ${NEXT_PUBLIC_CHAIN_ID:-4663}
+      NEXT_PUBLIC_RPC_URL: ${NEXT_PUBLIC_RPC_URL:-https://rpc.mainnet.chain.robinhood.com}
+      NEXT_PUBLIC_EXPLORER_URL: ${NEXT_PUBLIC_EXPLORER_URL:-https://robinhoodchain.blockscout.com}
+      NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID:-}
+      ROBINHOOD_CHAIN_RPC_URL: ${ROBINHOOD_CHAIN_RPC_URL:-https://rpc.mainnet.chain.robinhood.com}
+      ROBINHOOD_CHAIN_WS_URL: ${ROBINHOOD_CHAIN_WS_URL:-}
+      BLOCKSCOUT_API_URL: ${BLOCKSCOUT_API_URL:-https://robinhoodchain.blockscout.com/api/v2}
+      BLOCKSCOUT_API_KEY: ${BLOCKSCOUT_API_KEY:-}
+      ROBINFUN_FACTORIES: ${ROBINFUN_FACTORIES:-}
+      DEX_ADAPTER: ${DEX_ADAPTER:-robinfun-v2}
+      DEX_FACTORY_ADDRESS: ${DEX_FACTORY_ADDRESS:-}
+      DEX_ROUTER_ADDRESS: ${DEX_ROUTER_ADDRESS:-}
+      DEX_QUOTER_ADDRESS: ${DEX_QUOTER_ADDRESS:-}
+      WRAPPED_NATIVE_TOKEN_ADDRESS: ${WRAPPED_NATIVE_TOKEN_ADDRESS:-}
+      ALLOWED_ROUTER_ADDRESSES: ${ALLOWED_ROUTER_ADDRESSES:-}
+      ALLOWED_FACTORY_ADDRESSES: ${ALLOWED_FACTORY_ADDRESSES:-}
+      ALLOWED_QUOTER_ADDRESSES: ${ALLOWED_QUOTER_ADDRESSES:-}
+      ALLOWED_TOKEN_ADDRESSES: ${ALLOWED_TOKEN_ADDRESSES:-}
+      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
+      AUTOMATED_ORDERS_ENABLED: ${AUTOMATED_ORDERS_ENABLED:-false}
+      EXECUTION_WALLET_ADDRESS: ${EXECUTION_WALLET_ADDRESS:-}
+      DEFAULT_SLIPPAGE_BPS: ${DEFAULT_SLIPPAGE_BPS:-100}
+      MAX_SLIPPAGE_BPS: ${MAX_SLIPPAGE_BPS:-500}
+      MAX_PRICE_IMPACT_BPS: ${MAX_PRICE_IMPACT_BPS:-800}
+      DEFAULT_TRANSACTION_DEADLINE_SECONDS: ${DEFAULT_TRANSACTION_DEADLINE_SECONDS:-300}
+      EMERGENCY_PAUSE: ${EMERGENCY_PAUSE:-true}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
     volumes:
-      - ./prisma:/app/prisma
+      - hooddesk-data:/app/data
+    depends_on:
+      worker:
+        condition: service_healthy
 
   worker:
     build:
       context: .
       target: worker
-    depends_on:
-      db-permissions:
-        condition: service_completed_successfully
     env_file:
       - .env
+    environment:
+      DATABASE_URL: file:/app/data/dev.db
     volumes:
-      - ./prisma:/app/prisma
-    command: sh -c "npx prisma migrate deploy && npm run worker:start"
+      - hooddesk-data:/app/data
+      - ./prisma:/app/legacy-prisma:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/data/.migrations-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    command: >-
+      sh -ec "rm -f /app/data/.migrations-ready;
+      if [ ! -f /app/data/dev.db ] && [ -f /app/legacy-prisma/dev.db ];
+      then cp /app/legacy-prisma/dev.db /app/data/dev.db;
+      fi;
+      npx prisma migrate deploy &&
+      touch /app/data/.migrations-ready &&
+      exec npm run worker:start"
+
+volumes:
+  hooddesk-data:
+    name: hooddesk-data

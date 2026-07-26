@@ -1,21 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { formatEther } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { isAddress } from "viem";
 import { getPublicClient } from "@/src/lib/chain/client";
 import { getChain } from "@/src/config/chains";
 import { checkRateLimit, RATE_LIMITS } from "@/src/lib/security/rate-limit";
 
-// Derives only the PUBLIC address from the execution private key, mirroring
-// worker/index.ts. The raw key is never included in any response, logged,
-// or exposed beyond this in-memory derivation.
-function deriveExecutionAddress(): `0x${string}` | null {
-  const key = process.env.EXECUTION_PRIVATE_KEY as `0x${string}` | undefined;
-  if (!key) return null;
-  try {
-    return privateKeyToAccount(key).address;
-  } catch {
-    return null;
-  }
+function configuredExecutionAddress(): `0x${string}` | null {
+  const address = process.env.EXECUTION_WALLET_ADDRESS;
+  return address && isAddress(address) ? address : null;
 }
 
 export async function GET(req: NextRequest) {
@@ -32,7 +24,7 @@ export async function GET(req: NextRequest) {
       client.getGasPrice(),
     ]);
 
-    const executionAddress = deriveExecutionAddress();
+    const executionAddress = configuredExecutionAddress();
     const executionWalletBalanceWei = executionAddress
       ? await client.getBalance({ address: executionAddress })
       : null;

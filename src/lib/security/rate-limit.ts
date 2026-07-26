@@ -48,6 +48,9 @@ function sweepIfNeeded(now: number) {
  * with no reverse proxy in front) so the limiter never throws.
  */
 function getClientKey(req: NextRequest): string {
+  if (process.env.TRUST_PROXY_HEADERS !== "true") {
+    return "direct";
+  }
   try {
     const forwardedFor = req.headers.get("x-forwarded-for");
     if (forwardedFor) {

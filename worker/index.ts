@@ -65,14 +65,17 @@ async function main() {
 
   if (!EXECUTION_ENABLED || !AUTOMATED_ORDERS_ENABLED) {
     console.log("Automated execution disabled. Set EXECUTION_ENABLED=true and AUTOMATED_ORDERS_ENABLED=true to enable.");
+    if (!TOKEN_DISCOVERY_ENABLED) await keepWorkerHealthy();
     return;
   }
   if (EMERGENCY_PAUSE) {
     console.log("Emergency pause active. Worker will not execute trades.");
+    if (!TOKEN_DISCOVERY_ENABLED) await keepWorkerHealthy();
     return;
   }
   if (!walletClient || !account) {
     console.error("EXECUTION_PRIVATE_KEY not configured. Worker cannot sign transactions.");
+    if (!TOKEN_DISCOVERY_ENABLED) await keepWorkerHealthy();
     return;
   }
 
@@ -445,6 +448,11 @@ export async function processOrder(order: {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function keepWorkerHealthy() {
+  console.log("Worker is idle and will remain available for Docker health checks.");
+  while (true) await sleep(60_000);
 }
 
 main().catch(console.error);

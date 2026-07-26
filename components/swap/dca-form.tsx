@@ -6,10 +6,23 @@ import { parseUnits } from "viem";
 import { TokenSelectModal, NATIVE_ETH, type SelectableToken } from "./token-select-modal";
 import { generateAuthMessage } from "@/src/lib/security/signature";
 import { useTokenInfo } from "@/components/trading/use-token-info";
+import { useTokenStats } from "@/components/trading/use-token-stats";
 import { WETH } from "@/src/config/contracts";
 
 const DEFAULT_SLIPPAGE_BPS = 500;
 const MAX_PRICE_IMPACT_BPS = 800;
+
+function formatLastPrice(value: string) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return value;
+  if (numeric < 0.000001) return numeric.toExponential(4);
+  return numeric.toLocaleString(undefined, { maximumFractionDigits: 12 });
+}
+
+function formatPriceLimitValue(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return value.toFixed(18).replace(/0+$/, "").replace(/\.$/, "");
+}
 
 export function DcaForm({ fixedTokenAddress }: { fixedTokenAddress?: string } = {}) {
   const { address } = useAccount();
@@ -33,6 +46,13 @@ export function DcaForm({ fixedTokenAddress }: { fixedTokenAddress?: string } = 
 
   const tokenInfoQuery = useTokenInfo(fixedTokenAddress || "");
   const tokenInfo = tokenInfoQuery.data;
+  const pricedToken = sellToken.isNative ? buyToken : sellToken;
+  const pricedTokenAddress =
+    pricedToken && !pricedToken.isNative ? pricedToken.address : "";
+  const tokenStatsQuery = useTokenStats(pricedTokenAddress);
+  const lastPriceEth = tokenStatsQuery.data?.priceEth;
+  const priceLimitOffsets =
+    direction === "buy" ? [-5, -10, -25] : [5, 10, 25];
 
   // Initialize buyToken if fixedTokenAddress is provided and loaded
   useEffect(() => {
@@ -47,6 +67,40 @@ export function DcaForm({ fixedTokenAddress }: { fixedTokenAddress?: string } = 
       });
     }
   }, [fixedTokenAddress, tokenInfo, buyToken]);
+
+  function selectDirection(nextDirection: "buy" | "sell") {
+    if (nextDirection === direction) return;
+    setDirection(nextDirection);
+    setPriceLimit("");
+
+    if (
+      nextDirection === "sell" &&
+      sellToken.isNative &&
+      buyToken &&
+      !buyToken.isNative
+    ) {
+      setSellToken(buyToken);
+      setBuyToken(NATIVE_ETH);
+      setAmountPerInterval("");
+    } else if (
+      nextDirection === "buy" &&
+      !sellToken.isNative &&
+      buyToken?.isNative
+    ) {
+      setBuyToken(sellToken);
+      setSellToken(NATIVE_ETH);
+      setAmountPerInterval("");
+    }
+  }
+
+  function applyPriceLimitOffset(percent: number) {
+    if (!lastPriceEth) return;
+    const lastPrice = Number(lastPriceEth);
+    if (!Number.isFinite(lastPrice) || lastPrice <= 0) return;
+    setPriceLimit(
+      formatPriceLimitValue(lastPrice * (1 + percent / 100))
+    );
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -148,7 +202,7 @@ export function DcaForm({ fixedTokenAddress }: { fixedTokenAddress?: string } = 
       <div className="flex gap-2">
         <button
           type="button"
-          onClick={() => setDirection("buy")}
+          onClick={() => selectDirection("buy")}
           className={`flex-1 rounded-xl px-4 py-2 text-sm font-medium transition-colors ${
             direction === "buy"
               ? "bg-hood-green/20 text-hood-green border border-hood-green/40"
@@ -159,7 +213,7 @@ export function DcaForm({ fixedTokenAddress }: { fixedTokenAddress?: string } = 
         </button>
         <button
           type="button"
-          onClick={() => setDirection("sell")}
+          onClick={() => selectDirection("sell")}
           className={`flex-1 rounded-xl px-4 py-2 text-sm font-medium transition-colors ${
             direction === "sell"
               ? "bg-hood-red/20 text-hood-red border border-hood-red/40"
@@ -252,25 +306,64 @@ export function DcaForm({ fixedTokenAddress }: { fixedTokenAddress?: string } = 
       </div>
 
       <div>
-        <label className="text-sm text-hood-muted mb-1 block">
-          {direction === "buy" ? "Max price (ETH per token, optional)" : "Min price (ETH per token, optional)"}
-        </label>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label className="text-sm text-hood-muted block">
+            {direction === "buy"
+              ? "Max price (ETH per token, optional)"
+              : "Min price (ETH per token, optional)"}
+          </label>
+          {lastPriceEth && (
+            <button
+              type="button"
+              onClick={() => setPriceLimit(lastPriceEth)}
+              className="text-[11px] font-semibold text-hood-green hover:text-hood-green/80"
+            >
+              Use last: {formatLastPrice(lastPriceEth)}
+            </button>
+          )}
+        </div>
         <input
           type="text"
+          aria-label={
+            direction === "buy"
+              ? "Max price (ETH per token)"
+              : "Min price (ETH per token)"
+          }
           inputMode="decimal"
           value={priceLimit}
           onChange={(e) => {
             const v = e.target.value;
             if (v === "" || /^\d*\.?\d*$/.test(v)) setPriceLimit(v);
           }}
-          placeholder={direction === "buy" ? "Only buy at or below…" : "Only sell at or above…"}
+          placeholder={
+            lastPriceEth
+              ? formatLastPrice(lastPriceEth)
+              : direction === "buy"
+                ? "Only buy at or below…"
+                : "Only sell at or above…"
+          }
           className="hd-input w-full font-mono"
         />
         <p className="text-xs text-hood-muted mt-1">
           {direction === "buy"
             ? "Iterations above this price are skipped."
             : "Iterations below this price are skipped."}
+          {" "}Prices use ETH per token, not USD.
         </p>
+        {lastPriceEth && (
+          <div className="mt-2 grid grid-cols-3 gap-1.5">
+            {priceLimitOffsets.map((percent) => (
+              <button
+                key={percent}
+                type="button"
+                onClick={() => applyPriceLimitOffset(percent)}
+                className="rounded-lg border border-hood-border bg-hood-well px-2 py-1.5 text-[11px] font-semibold text-hood-muted transition-colors hover:border-hood-green/40 hover:text-hood-text"
+              >
+                {percent > 0 ? `+${percent}%` : `${percent}%`}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div>

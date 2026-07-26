@@ -13,6 +13,16 @@ interface Token {
   decimals: number;
   dexLive: boolean;
   priceEth?: string | null;
+  change24hPct?: number | null;
+}
+
+function mergeTokens(primary: Token[], additional: Token[]) {
+  const merged = new Map<string, Token>();
+  for (const token of [...primary, ...additional]) {
+    const key = token.address.toLowerCase();
+    merged.set(key, { ...merged.get(key), ...token });
+  }
+  return [...merged.values()];
 }
 
 function formatEthPrice(value: string | null | undefined) {
@@ -25,6 +35,13 @@ function formatEthPrice(value: string | null | undefined) {
   return `${formatted} ETH`;
 }
 
+function formatChange(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "-";
+  }
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
 export default function MarketsPage() {
   const { address } = useAccount();
   const { signMessageAsync } = useSignMessage();
@@ -34,14 +51,30 @@ export default function MarketsPage() {
   const [watched, setWatched] = useState<Set<string>>(new Set());
   const [watchlistOnly, setWatchlistOnly] = useState(false);
   const [watchError, setWatchError] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   // Removed localStorage for manual address since we use connected wallet
 
   useEffect(() => {
     fetch("/api/tokens")
-      .then((r) => r.json())
-      .then((data) => setTokens(data.tokens ?? []))
-      .catch(console.error)
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error ?? "Failed to load markets");
+        }
+        return data;
+      })
+      // Preserve tokens loaded explicitly for the connected wallet even when
+      // they fall outside the general 100-token market page.
+      .then((data) =>
+        setTokens((current) => mergeTokens(data.tokens ?? [], current))
+      )
+      .catch((error) => {
+        console.error(error);
+        setWatchError(
+          error instanceof Error ? error.message : "Failed to load markets"
+        );
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -51,13 +84,81 @@ export default function MarketsPage() {
       return;
     }
     fetch(`/api/watchlist?owner=${address}`)
-      .then((r) => r.json())
-      .then((data) => {
-        const list: { tokenAddress: string }[] = data.watchlist ?? [];
-        setWatched(new Set(list.map((w) => w.tokenAddress.toLowerCase())));
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error ?? "Failed to load watchlist");
+        }
+        return data;
       })
-      .catch(console.error);
+      .then(async (data) => {
+        const list: { tokenAddress: string }[] = data.watchlist ?? [];
+        const watchedAddresses = list.map((item) =>
+          item.tokenAddress.toLowerCase()
+        );
+        setWatched(new Set(watchedAddresses));
+
+        if (watchedAddresses.length === 0) return;
+        const response = await fetch(
+          `/api/tokens?addresses=${encodeURIComponent(watchedAddresses.join(","))}`
+        );
+        const tokenData = await response.json();
+        if (!response.ok) {
+          throw new Error(
+            tokenData.error ?? "Failed to load watched token prices"
+          );
+        }
+        setTokens((current) =>
+          mergeTokens(current, tokenData.tokens ?? [])
+        );
+      })
+      .catch((error) => {
+        console.error(error);
+        setWatchError(
+          error instanceof Error ? error.message : "Failed to load watchlist"
+        );
+      });
   }, [address]);
+
+  useEffect(() => {
+    const query = search.trim().toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(query)) {
+      setSearchError(null);
+      return;
+    }
+    if (tokens.some((token) => token.address.toLowerCase() === query)) {
+      setSearchError(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `/api/tokens?address=${encodeURIComponent(query)}`,
+          { signal: controller.signal }
+        );
+        const data = await response.json();
+        if (!response.ok || !data.token) {
+          throw new Error(data.error ?? "Token was not found");
+        }
+        setTokens((current) => mergeTokens([data.token], current));
+        setSearchError(null);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setSearchError(
+          error instanceof Error
+            ? error.message
+            : "Unable to resolve that token address"
+        );
+      }
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [search, tokens]);
 
   async function toggleWatch(tokenAddress: string) {
     if (!address) {
@@ -153,6 +254,9 @@ export default function MarketsPage() {
       </div>
 
       {watchError && <div className="hd-error mb-4 max-w-xl">{watchError}</div>}
+      {searchError && (
+        <div className="hd-error mb-4 max-w-xl">{searchError}</div>
+      )}
 
       <div className="hd-card overflow-hidden">
         {loading ? (
@@ -226,10 +330,22 @@ export default function MarketsPage() {
                         {formatEthPrice(token.priceEth)}
                       </td>
                       <td
-                        className="text-right tabular-nums text-hood-muted"
-                        title="24-hour change is unavailable until a reliable on-chain trade history exists."
+                        className={`text-right font-mono tabular-nums ${
+                          token.change24hPct === null ||
+                          token.change24hPct === undefined
+                            ? "text-hood-muted"
+                            : token.change24hPct >= 0
+                              ? "text-hood-green"
+                              : "text-hood-red"
+                        }`}
+                        title={
+                          token.change24hPct === null ||
+                          token.change24hPct === undefined
+                            ? "No reliable onchain price was available at the 24-hour boundary."
+                            : "Change from the onchain price at the 24-hour boundary."
+                        }
                       >
-                        -
+                        {formatChange(token.change24hPct)}
                       </td>
                       <td className="pr-4 font-mono text-hood-muted text-right">
                         <a

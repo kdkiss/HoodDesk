@@ -1,32 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { type Address, formatEther } from "viem";
+import { type Address, formatEther, formatUnits } from "viem";
 import { getPublicClient } from "@/src/lib/chain/client";
 import { checkRateLimit, RATE_LIMITS } from "@/src/lib/security/rate-limit";
 import { ROBINFUN_FACTORY_ABI } from "@/src/lib/dex/abi/robinfun-factory";
 import { ROBINFUN_FACTORIES, WETH } from "@/src/config/contracts";
 import { curveAdapter, v2Adapter } from "@/src/lib/dex";
 import { prisma } from "@/src/lib/db";
-
-// Uniswap V2 pair Swap event — minimal ABI slice needed for log decoding.
-const V2_PAIR_ABI = [
-  {
-    type: "event",
-    name: "Swap",
-    inputs: [
-      { name: "sender", type: "address", indexed: true },
-      { name: "amount0In", type: "uint256", indexed: false },
-      { name: "amount1In", type: "uint256", indexed: false },
-      { name: "amount0Out", type: "uint256", indexed: false },
-      { name: "amount1Out", type: "uint256", indexed: false },
-      { name: "to", type: "address", indexed: true },
-    ],
-  },
-] as const;
+import {
+  getBlockscoutEthUsd,
+  getBlockscoutTokenMarketData,
+  getBlockscoutV2SwapHistory,
+} from "@/src/lib/blockscout/market-data";
+import { retryRpcRead } from "@/src/lib/chain/retry";
+import { mapWithConcurrency } from "@/src/lib/async/map-with-concurrency";
+import {
+  bucketIntoCandles,
+  scaleCandles,
+  type PricePoint,
+} from "@/src/lib/chart/candles";
+import {
+  CHART_RESOLUTION_IDS,
+  CHART_TIMEFRAME_IDS,
+  DEFAULT_CHART_RESOLUTION,
+  DEFAULT_CHART_TIMEFRAME,
+  chartResolutionConfig,
+  chartTimeframeConfig,
+} from "@/src/lib/chart/timeframes";
 
 const querySchema = z.object({
   token: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  range: z.enum(["5M", "15M", "1H", "1D", "1W", "1M", "3M", "1Y"]).default("1D"),
+  timeframe: z.enum(CHART_TIMEFRAME_IDS).default(DEFAULT_CHART_TIMEFRAME),
+  resolution: z.enum(CHART_RESOLUTION_IDS).default(DEFAULT_CHART_RESOLUTION),
 });
 
 // Measured directly against Robinhood Chain mainnet (50,000-block sample,
@@ -41,35 +46,6 @@ const ESTIMATED_BLOCK_TIME_SECONDS = 0.1;
 // long time ranges. 200K blocks ≈ ~5.5 hours at 0.1s/block.
 const MAX_LOOKBACK_BLOCKS = 200_000n;
 
-const RANGE_CONFIG: Record<
-  string,
-  { lookbackSeconds: number; bucketSeconds: number }
-> = {
-  "5M": { lookbackSeconds: 5 * 60, bucketSeconds: 5 }, // 5s candles over 5m window
-  "15M": { lookbackSeconds: 15 * 60, bucketSeconds: 15 }, // 15s candles over 15m window
-  "1H": { lookbackSeconds: 60 * 60, bucketSeconds: 60 }, // 1m candles
-  "1D": { lookbackSeconds: 24 * 60 * 60, bucketSeconds: 5 * 60 }, // 5m candles
-  "1W": { lookbackSeconds: 7 * 24 * 60 * 60, bucketSeconds: 60 * 60 }, // 1h candles
-  "1M": { lookbackSeconds: 30 * 24 * 60 * 60, bucketSeconds: 4 * 60 * 60 }, // 4h candles
-  "3M": { lookbackSeconds: 90 * 24 * 60 * 60, bucketSeconds: 24 * 60 * 60 }, // 1d candles
-  "1Y": { lookbackSeconds: 365 * 24 * 60 * 60, bucketSeconds: 24 * 60 * 60 }, // 1d candles
-};
-
-interface PricePoint {
-  timestamp: number; // seconds
-  price: number; // ETH per token (display units)
-  volumeEth: number;
-}
-
-interface Candle {
-  time: number; // seconds, bucket start
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
-
 export async function GET(req: NextRequest) {
   const limited = checkRateLimit(req, { ...RATE_LIMITS.onchainRead, bucket: "candles" });
   if (limited) return limited;
@@ -81,46 +57,100 @@ export async function GET(req: NextRequest) {
   }
 
   const token = parsed.data.token as Address;
-  const range = parsed.data.range;
-  const config = RANGE_CONFIG[range];
+  const timeframe = parsed.data.timeframe;
+  const resolution = parsed.data.resolution;
+  const lookbackSeconds = chartTimeframeConfig(timeframe).lookbackSeconds;
+  const bucketSeconds = chartResolutionConfig(resolution).bucketSeconds;
 
   try {
     const client = getPublicClient();
-
-    const isRobinFun = await curveAdapter.isRobinFunToken(token);
+    const metadata = await prisma.tokenMetadata.findUnique({
+      where: { address: token.toLowerCase() },
+    });
+    const isRobinFun = metadata?.isRobinFun ?? (await curveAdapter.isRobinFunToken(token));
     if (!isRobinFun) {
       return NextResponse.json({ error: "Token is not a RobinFun token" }, { status: 404 });
     }
 
-    const graduated = await curveAdapter.isGraduated(token);
-
-    const latestBlock = await client.getBlockNumber();
-    const lookbackBlocks = BigInt(
-      Math.ceil(config.lookbackSeconds / ESTIMATED_BLOCK_TIME_SECONDS)
-    );
-    const cappedLookback = lookbackBlocks > MAX_LOOKBACK_BLOCKS ? MAX_LOOKBACK_BLOCKS : lookbackBlocks;
-    const fromBlock = latestBlock > cappedLookback ? latestBlock - cappedLookback : 0n;
+    const graduated = metadata?.dexLive ?? (await curveAdapter.isGraduated(token));
 
     let pricePoints: PricePoint[] = [];
+    let truncated = false;
+    let source: "blockscout" | "rpc";
 
     if (graduated) {
-      pricePoints = await fetchGraduatedPricePoints(client, token, fromBlock, latestBlock);
+      source = "blockscout";
+      const pair =
+        metadata?.pairAddress ??
+        (await retryRpcRead(() => v2Adapter.getTokenInfo(token))).pairAddress;
+      if (pair) {
+        const result = await fetchGraduatedPricePoints(
+          token,
+          pair as Address,
+          Math.floor(Date.now() / 1000) - lookbackSeconds
+        );
+        pricePoints = result.points;
+        truncated = result.truncated;
+      }
     } else {
+      source = "rpc";
+      const latestBlock = await retryRpcRead(() => client.getBlockNumber());
+      const lookbackBlocks = BigInt(
+        Math.ceil(lookbackSeconds / ESTIMATED_BLOCK_TIME_SECONDS)
+      );
+      const cappedLookback =
+        lookbackBlocks > MAX_LOOKBACK_BLOCKS ? MAX_LOOKBACK_BLOCKS : lookbackBlocks;
+      const fromBlock = latestBlock > cappedLookback ? latestBlock - cappedLookback : 0n;
       pricePoints = await fetchCurvePricePoints(client, token, fromBlock, latestBlock);
+      truncated = lookbackBlocks > MAX_LOOKBACK_BLOCKS;
     }
 
     if (pricePoints.length === 0) {
       return NextResponse.json({
         token,
-        range,
+        timeframe,
+        resolution,
         graduated,
         candles: [],
         insufficientData: true,
+        bucketSeconds,
+        observedCandles: 0,
+        source,
+        truncated,
         message: "Historical chart data is not yet available for this market.",
       });
     }
 
-    const candles = bucketIntoCandles(pricePoints, config.bucketSeconds);
+    const [indexedMarket, ethUsd] = await Promise.all([
+      getBlockscoutTokenMarketData(token).catch(() => null),
+      getBlockscoutEthUsd().catch(() => null),
+    ]);
+    const supplyRaw = metadata?.totalSupply ?? indexedMarket?.totalSupplyRaw ?? null;
+    const decimals = metadata?.decimals ?? 18;
+    const totalSupplyTokens =
+      supplyRaw === null ? null : Number(formatUnits(BigInt(supplyRaw), decimals));
+    const canShowMarketCap =
+      totalSupplyTokens !== null &&
+      Number.isFinite(totalSupplyTokens) &&
+      totalSupplyTokens > 0;
+    const canShowUsdMarketCap =
+      canShowMarketCap &&
+      ethUsd !== null &&
+      Number.isFinite(ethUsd) &&
+      ethUsd > 0;
+    const multiplier = canShowUsdMarketCap
+      ? totalSupplyTokens * ethUsd
+      : canShowMarketCap
+        ? totalSupplyTokens
+        : 1;
+    const observedCandles = bucketIntoCandles(pricePoints, bucketSeconds);
+    const scaledCandles = scaleCandles(observedCandles, multiplier);
+    const candles = scaledCandles;
+    const metric = canShowUsdMarketCap
+      ? "marketCapUsd"
+      : canShowMarketCap
+        ? "marketCapEth"
+        : "priceEth";
 
     // Only "no real trades at all in the window" counts as unavailable. A
     // market with a single trade still has a real onchain price point — show
@@ -128,20 +158,34 @@ export async function GET(req: NextRequest) {
     if (candles.length === 0) {
       return NextResponse.json({
         token,
-        range,
+        timeframe,
+        resolution,
         graduated,
         candles: [],
         insufficientData: true,
         message: "Historical chart data is not yet available for this market.",
+        bucketSeconds,
+        observedCandles: 0,
+        source,
+        truncated,
       });
     }
 
     return NextResponse.json({
       token,
-      range,
+      timeframe,
+      resolution,
       graduated,
       candles,
       insufficientData: false,
+      metric,
+      unit: canShowUsdMarketCap ? "USD" : "ETH",
+      totalSupplyTokens: canShowMarketCap ? totalSupplyTokens : null,
+      ethUsd: canShowUsdMarketCap ? ethUsd : null,
+      bucketSeconds,
+      observedCandles: observedCandles.length,
+      source,
+      truncated,
     });
   } catch (err) {
     return NextResponse.json(
@@ -158,7 +202,7 @@ async function blockTimestamp(
 ): Promise<number> {
   const cached = cache.get(blockNumber);
   if (cached !== undefined) return cached;
-  const block = await client.getBlock({ blockNumber });
+  const block = await retryRpcRead(() => client.getBlock({ blockNumber }));
   const ts = Number(block.timestamp);
   cache.set(blockNumber, ts);
   return ts;
@@ -191,22 +235,24 @@ async function fetchCurvePricePoints(
 ): Promise<PricePoint[]> {
   const factory = await resolveCurveFactory(token);
 
-  const [buyLogs, sellLogs] = await Promise.all([
-    client.getLogs({
-      address: factory,
-      event: ROBINFUN_FACTORY_ABI.find((e) => e.type === "event" && e.name === "Buy")!,
-      args: { token },
-      fromBlock,
-      toBlock,
-    }),
-    client.getLogs({
-      address: factory,
-      event: ROBINFUN_FACTORY_ABI.find((e) => e.type === "event" && e.name === "Sell")!,
-      args: { token },
-      fromBlock,
-      toBlock,
-    }),
-  ]);
+  const [buyLogs, sellLogs] = await retryRpcRead(() =>
+    Promise.all([
+      client.getLogs({
+        address: factory,
+        event: ROBINFUN_FACTORY_ABI.find((e) => e.type === "event" && e.name === "Buy")!,
+        args: { token },
+        fromBlock,
+        toBlock,
+      }),
+      client.getLogs({
+        address: factory,
+        event: ROBINFUN_FACTORY_ABI.find((e) => e.type === "event" && e.name === "Sell")!,
+        args: { token },
+        fromBlock,
+        toBlock,
+      }),
+    ])
+  );
 
   const allLogs = [...buyLogs, ...sellLogs].sort((a, b) => {
     if (a.blockNumber === b.blockNumber) {
@@ -219,7 +265,9 @@ async function fetchCurvePricePoints(
 
   // Pre-fetch all unique block timestamps in parallel
   const uniqueBlocks = [...new Set(allLogs.map((l) => l.blockNumber!))];
-  await Promise.all(uniqueBlocks.map((bn) => blockTimestamp(client, bn, tsCache)));
+  await mapWithConcurrency(uniqueBlocks, 8, (blockNumber) =>
+    blockTimestamp(client, blockNumber, tsCache)
+  );
 
   const points: PricePoint[] = [];
 
@@ -250,47 +298,32 @@ async function fetchCurvePricePoints(
 }
 
 async function fetchGraduatedPricePoints(
-  client: ReturnType<typeof getPublicClient>,
   token: Address,
-  fromBlock: bigint,
-  toBlock: bigint
-): Promise<PricePoint[]> {
-  const tokenInfo = await v2Adapter.getTokenInfo(token);
-  const pair = tokenInfo.pairAddress;
-  if (!pair) return [];
+  pair: Address,
+  sinceTimestamp: number
+): Promise<{ points: PricePoint[]; truncated: boolean }> {
+  const pairTokens = await v2Adapter.getPairTokens(pair);
+  const tokenIsToken0 = pairTokens.token0.toLowerCase() === token.toLowerCase();
+  const wethIsToken0 = pairTokens.token0.toLowerCase() === WETH.toLowerCase();
 
-  const reservesInfo = await v2Adapter.getPairReserves(pair);
-  const tokenIsToken0 = reservesInfo.token0.toLowerCase() === token.toLowerCase();
-  const wethIsToken0 = reservesInfo.token0.toLowerCase() === WETH.toLowerCase();
-
-  if (!tokenIsToken0 && reservesInfo.token1.toLowerCase() !== token.toLowerCase()) {
-    return [];
+  if (!tokenIsToken0 && pairTokens.token1.toLowerCase() !== token.toLowerCase()) {
+    return { points: [], truncated: false };
   }
 
-  const logs = await client.getLogs({
-    address: pair,
-    event: V2_PAIR_ABI[0],
-    fromBlock,
-    toBlock,
+  const result = await getBlockscoutV2SwapHistory(pair, {
+    sinceTimestamp,
+    limit: 10_000,
   });
-
-  const tsCache = new Map<bigint, number>();
-
-  // Pre-fetch all unique block timestamps in parallel
-  const uniqueBlocks = [...new Set(logs.map((l) => l.blockNumber!))];
-  await Promise.all(uniqueBlocks.map((bn) => blockTimestamp(client, bn, tsCache)));
 
   const points: PricePoint[] = [];
 
-  for (const log of logs) {
-    const args = (log as unknown as { args: Record<string, unknown> }).args;
-    const blockNumber = log.blockNumber!;
-    const timestamp = tsCache.get(blockNumber)!;
-
-    const amount0In = args.amount0In as bigint;
-    const amount1In = args.amount1In as bigint;
-    const amount0Out = args.amount0Out as bigint;
-    const amount1Out = args.amount1Out as bigint;
+  for (const swap of result.swaps) {
+    const {
+      amount0In,
+      amount1In,
+      amount0Out,
+      amount1Out,
+    } = swap;
 
     let ethAmount: bigint;
     let tokenAmount: bigint;
@@ -308,39 +341,14 @@ async function fetchGraduatedPricePoints(
     const price = Number(formatEther(ethAmount)) / Number(formatEther(tokenAmount));
 
     points.push({
-      timestamp,
+      timestamp: swap.timestamp,
       price,
       volumeEth: Number(formatEther(ethAmount)),
     });
   }
 
-  return points.sort((a, b) => a.timestamp - b.timestamp);
-}
-
-function bucketIntoCandles(points: PricePoint[], bucketSeconds: number): Candle[] {
-  if (points.length === 0) return [];
-
-  const buckets = new Map<number, Candle>();
-
-  for (const point of points) {
-    const bucketStart = Math.floor(point.timestamp / bucketSeconds) * bucketSeconds;
-    const existing = buckets.get(bucketStart);
-    if (!existing) {
-      buckets.set(bucketStart, {
-        time: bucketStart,
-        open: point.price,
-        high: point.price,
-        low: point.price,
-        close: point.price,
-        volume: point.volumeEth,
-      });
-    } else {
-      existing.high = Math.max(existing.high, point.price);
-      existing.low = Math.min(existing.low, point.price);
-      existing.close = point.price;
-      existing.volume += point.volumeEth;
-    }
-  }
-
-  return Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+  return {
+    points: points.sort((a, b) => a.timestamp - b.timestamp),
+    truncated: result.truncated,
+  };
 }

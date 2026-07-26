@@ -22,6 +22,7 @@ const envSchema = z.object({
   EXECUTION_ENABLED: z.coerce.boolean().default(false),
   AUTOMATED_ORDERS_ENABLED: z.coerce.boolean().default(false),
   EXECUTION_PRIVATE_KEY: z.string().optional().default(""),
+  EXECUTION_WALLET_ADDRESS: z.string().optional().default(""),
   EXECUTION_POLL_INTERVAL_MS: z.coerce.number().default(8000),
   EXECUTION_MAX_ATTEMPTS: z.coerce.number().default(3),
   EXECUTION_CONFIRMATIONS: z.coerce.number().default(1),
@@ -32,6 +33,7 @@ const envSchema = z.object({
   MAX_PRICE_IMPACT_BPS: z.coerce.number().int().min(1).max(2_000).default(800),
   DEFAULT_TRANSACTION_DEADLINE_SECONDS: z.coerce.number().default(300),
   EMERGENCY_PAUSE: z.coerce.boolean().default(false),
+  TRUST_PROXY_HEADERS: z.coerce.boolean().default(false),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -5,6 +5,7 @@ import { ROBINFUN_TOKEN_ABI } from "../abi/robinfun-token";
 import { getCurveDex } from "../registry";
 import type { BondingCurveState, SwapQuote, SwapRoute, TokenInfo } from "../types";
 import { ROBINFUN_FACTORIES } from "@/src/config/contracts";
+import { retryRpcRead } from "@/src/lib/chain/retry";
 
 export class RobinFunCurveAdapter {
   id = "robinfun-curve";
@@ -24,11 +25,13 @@ export class RobinFunCurveAdapter {
     const key = token.toLowerCase();
     const cached = this.factoryCache.get(key);
     if (cached) return cached;
-    const factory = (await this.client.readContract({
-      address: token,
-      abi: ROBINFUN_TOKEN_ABI,
-      functionName: "factory",
-    })) as Address;
+    const factory = (await retryRpcRead(() =>
+      this.client.readContract({
+        address: token,
+        abi: ROBINFUN_TOKEN_ABI,
+        functionName: "factory",
+      })
+    )) as Address;
     this.factoryCache.set(key, factory);
     return factory;
   }
@@ -44,12 +47,14 @@ export class RobinFunCurveAdapter {
 
   async getCurveState(token: Address): Promise<BondingCurveState> {
     const factory = await this.factoryFor(token);
-    const result = await this.client.readContract({
-      address: factory,
-      abi: ROBINFUN_FACTORY_ABI,
-      functionName: "curves",
-      args: [token],
-    });
+    const result = await retryRpcRead(() =>
+      this.client.readContract({
+        address: factory,
+        abi: ROBINFUN_FACTORY_ABI,
+        functionName: "curves",
+        args: [token],
+      })
+    );
 
     const [
       virtualEth,

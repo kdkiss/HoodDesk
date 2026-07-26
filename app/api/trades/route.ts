@@ -7,21 +7,9 @@ import { ROBINFUN_FACTORY_ABI } from "@/src/lib/dex/abi/robinfun-factory";
 import { ROBINFUN_FACTORIES, WETH } from "@/src/config/contracts";
 import { curveAdapter, v2Adapter } from "@/src/lib/dex";
 import { prisma } from "@/src/lib/db";
-
-const V2_PAIR_ABI = [
-  {
-    type: "event",
-    name: "Swap",
-    inputs: [
-      { name: "sender", type: "address", indexed: true },
-      { name: "amount0In", type: "uint256", indexed: false },
-      { name: "amount1In", type: "uint256", indexed: false },
-      { name: "amount0Out", type: "uint256", indexed: false },
-      { name: "amount1Out", type: "uint256", indexed: false },
-      { name: "to", type: "address", indexed: true },
-    ],
-  },
-] as const;
+import { getBlockscoutV2Swaps } from "@/src/lib/blockscout/market-data";
+import { retryRpcRead } from "@/src/lib/chain/retry";
+import { mapWithConcurrency } from "@/src/lib/async/map-with-concurrency";
 
 const querySchema = z.object({
   token: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
@@ -59,30 +47,47 @@ export async function GET(req: NextRequest) {
 
   try {
     const client = getPublicClient();
-    const isRobinFun = await curveAdapter.isRobinFunToken(token);
+    const metadata = await prisma.tokenMetadata.findUnique({
+      where: { address: token.toLowerCase() },
+    });
+    const isRobinFun = metadata?.isRobinFun ?? (await curveAdapter.isRobinFunToken(token));
     if (!isRobinFun) {
       return NextResponse.json({ error: "Token is not a RobinFun token" }, { status: 404 });
     }
 
-    const graduated = await curveAdapter.isGraduated(token);
-    const latestBlock = await client.getBlockNumber();
-    const fromBlock =
-      latestBlock > RECENT_TRADES_LOOKBACK_BLOCKS
-        ? latestBlock - RECENT_TRADES_LOOKBACK_BLOCKS
-        : 0n;
+    const graduated = metadata?.dexLive ?? (await curveAdapter.isGraduated(token));
 
     let trades: RecentTrade[] = [];
+    let truncated = false;
 
     if (graduated) {
-      trades = await fetchGraduatedTrades(client, token, fromBlock, latestBlock);
+      const pair =
+        metadata?.pairAddress ??
+        (await retryRpcRead(() => v2Adapter.getTokenInfo(token))).pairAddress;
+      if (pair) {
+        const result = await fetchGraduatedTrades(token, pair as Address, limit);
+        trades = result.trades;
+        truncated = result.truncated;
+      }
     } else {
+      const latestBlock = await retryRpcRead(() => client.getBlockNumber());
+      const fromBlock =
+        latestBlock > RECENT_TRADES_LOOKBACK_BLOCKS
+          ? latestBlock - RECENT_TRADES_LOOKBACK_BLOCKS
+          : 0n;
       trades = await fetchCurveTrades(client, token, fromBlock, latestBlock);
     }
 
     trades.sort((a, b) => b.timestamp - a.timestamp);
     trades = trades.slice(0, limit);
 
-    return NextResponse.json({ token, graduated, trades });
+    return NextResponse.json({
+      token,
+      graduated,
+      trades,
+      source: graduated ? "blockscout" : "rpc",
+      truncated,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Unknown error" },
@@ -98,7 +103,7 @@ async function blockTimestamp(
 ): Promise<number> {
   const cached = cache.get(blockNumber);
   if (cached !== undefined) return cached;
-  const block = await client.getBlock({ blockNumber });
+  const block = await retryRpcRead(() => client.getBlock({ blockNumber }));
   const ts = Number(block.timestamp);
   cache.set(blockNumber, ts);
   return ts;
@@ -130,29 +135,33 @@ async function fetchCurveTrades(
 ): Promise<RecentTrade[]> {
   const factory = await resolveCurveFactory(token);
 
-  const [buyLogs, sellLogs] = await Promise.all([
-    client.getLogs({
-      address: factory,
-      event: ROBINFUN_FACTORY_ABI.find((e) => e.type === "event" && e.name === "Buy")!,
-      args: { token },
-      fromBlock,
-      toBlock,
-    }),
-    client.getLogs({
-      address: factory,
-      event: ROBINFUN_FACTORY_ABI.find((e) => e.type === "event" && e.name === "Sell")!,
-      args: { token },
-      fromBlock,
-      toBlock,
-    }),
-  ]);
+  const [buyLogs, sellLogs] = await retryRpcRead(() =>
+    Promise.all([
+      client.getLogs({
+        address: factory,
+        event: ROBINFUN_FACTORY_ABI.find((e) => e.type === "event" && e.name === "Buy")!,
+        args: { token },
+        fromBlock,
+        toBlock,
+      }),
+      client.getLogs({
+        address: factory,
+        event: ROBINFUN_FACTORY_ABI.find((e) => e.type === "event" && e.name === "Sell")!,
+        args: { token },
+        fromBlock,
+        toBlock,
+      }),
+    ])
+  );
 
   const allLogs = [...buyLogs, ...sellLogs];
   const tsCache = new Map<bigint, number>();
   
   // Pre-fetch all unique block timestamps in parallel to prevent duplicate RPC calls
   const uniqueBlocks = [...new Set(allLogs.map((l) => l.blockNumber!))];
-  await Promise.all(uniqueBlocks.map((bn) => blockTimestamp(client, bn, tsCache)));
+  await mapWithConcurrency(uniqueBlocks, 8, (blockNumber) =>
+    blockTimestamp(client, blockNumber, tsCache)
+  );
 
   const trades: RecentTrade[] = [];
 
@@ -200,45 +209,29 @@ async function fetchCurveTrades(
 }
 
 async function fetchGraduatedTrades(
-  client: ReturnType<typeof getPublicClient>,
   token: Address,
-  fromBlock: bigint,
-  toBlock: bigint
-): Promise<RecentTrade[]> {
-  const tokenInfo = await v2Adapter.getTokenInfo(token);
-  const pair = tokenInfo.pairAddress;
-  if (!pair) return [];
+  pair: Address,
+  limit: number
+): Promise<{ trades: RecentTrade[]; truncated: boolean }> {
+  const pairTokens = await v2Adapter.getPairTokens(pair);
+  const wethIsToken0 = pairTokens.token0.toLowerCase() === WETH.toLowerCase();
+  const tokenIsToken0 = pairTokens.token0.toLowerCase() === token.toLowerCase();
+  const tokenIsToken1 = pairTokens.token1.toLowerCase() === token.toLowerCase();
+  if (!tokenIsToken0 && !tokenIsToken1) {
+    return { trades: [], truncated: false };
+  }
 
-  const reservesInfo = await v2Adapter.getPairReserves(pair);
-  const wethIsToken0 = reservesInfo.token0.toLowerCase() === WETH.toLowerCase();
-  const tokenIsToken0 = reservesInfo.token0.toLowerCase() === token.toLowerCase();
-  const tokenIsToken1 = reservesInfo.token1.toLowerCase() === token.toLowerCase();
-  if (!tokenIsToken0 && !tokenIsToken1) return [];
-
-  const logs = await client.getLogs({
-    address: pair,
-    event: V2_PAIR_ABI[0],
-    fromBlock,
-    toBlock,
-  });
-
-  const tsCache = new Map<bigint, number>();
-  
-  // Pre-fetch all unique block timestamps in parallel
-  const uniqueBlocks = [...new Set(logs.map((l) => l.blockNumber!))];
-  await Promise.all(uniqueBlocks.map((bn) => blockTimestamp(client, bn, tsCache)));
+  const result = await getBlockscoutV2Swaps(pair, { limit });
 
   const trades: RecentTrade[] = [];
 
-  const graduatedTrades = logs.map((log) => {
-    const args = (log as unknown as { args: Record<string, unknown> }).args;
-    const blockNumber = log.blockNumber!;
-    const timestamp = tsCache.get(blockNumber)!;
-
-    const amount0In = args.amount0In as bigint;
-    const amount1In = args.amount1In as bigint;
-    const amount0Out = args.amount0Out as bigint;
-    const amount1Out = args.amount1Out as bigint;
+  const graduatedTrades = result.swaps.map((swap) => {
+    const {
+      amount0In,
+      amount1In,
+      amount0Out,
+      amount1Out,
+    } = swap;
 
     let ethAmount: bigint;
     let tokenAmount: bigint;
@@ -257,8 +250,8 @@ async function fetchGraduatedTrades(
     if (tokenAmount === 0n || ethAmount === 0n) return null;
 
     const isTokenWethPair =
-      (tokenIsToken0 && reservesInfo.token1.toLowerCase() === WETH.toLowerCase()) ||
-      (tokenIsToken1 && reservesInfo.token0.toLowerCase() === WETH.toLowerCase());
+      (tokenIsToken0 && pairTokens.token1.toLowerCase() === WETH.toLowerCase()) ||
+      (tokenIsToken1 && pairTokens.token0.toLowerCase() === WETH.toLowerCase());
 
     const direction: RecentTrade["direction"] = isTokenWethPair
       ? ethIn
@@ -269,17 +262,17 @@ async function fetchGraduatedTrades(
     const price = Number(formatEther(ethAmount)) / Number(formatEther(tokenAmount));
 
     return {
-      txHash: log.transactionHash! as string,
-      blockNumber: blockNumber.toString(),
-      timestamp,
+      txHash: swap.transactionHash,
+      blockNumber: String(swap.blockNumber),
+      timestamp: swap.timestamp,
       direction,
       price: price.toString(),
       amountToken: formatEther(tokenAmount),
       amountEth: formatEther(ethAmount),
-      wallet: (args.to as string) ?? (args.sender as string) ?? "",
+      wallet: swap.to || swap.sender,
     } satisfies RecentTrade;
   });
   trades.push(...graduatedTrades.filter((t): t is RecentTrade => t !== null));
 
-  return trades;
+  return { trades, truncated: result.truncated };
 }

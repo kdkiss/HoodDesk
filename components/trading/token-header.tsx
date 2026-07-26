@@ -10,8 +10,8 @@ function shorten(addr: string) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-function formatUsd(v: number | null): string {
-  if (v === null) return "-";
+function formatUsd(v: number | null): string | undefined {
+  if (v === null) return undefined;
   if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
   if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
   if (v >= 1) return `$${v.toFixed(2)}`;
@@ -26,6 +26,15 @@ function formatEth(v: string): string {
   if (n >= 1) return n.toFixed(4);
   if (n === 0) return "0";
   return n.toPrecision(4);
+}
+
+function formatTokenPriceEth(v: string): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  if (n === 0) return "0";
+  if (n >= 0.0001) return n.toFixed(8).replace(/\.?0+$/, "");
+  if (n >= 0.00000001) return n.toFixed(12).replace(/\.?0+$/, "");
+  return n.toPrecision(6);
 }
 
 export function TokenHeader({ tokenAddress }: { tokenAddress: string }) {
@@ -55,20 +64,20 @@ export function TokenHeader({ tokenAddress }: { tokenAddress: string }) {
   const changeColor = change === null ? "text-hood-muted" : change >= 0 ? "text-hood-green" : "text-hood-red";
 
   return (
-    <div className="py-1.5 flex items-center border-b border-hood-border">
-      <div className="flex flex-wrap items-center gap-x-8 gap-y-2 w-full">
+    <div className="flex items-center">
+      <div className="flex w-full flex-wrap items-center gap-x-7 gap-y-3">
         {/* Identity */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex min-w-[210px] items-center gap-2">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-lg truncate text-hood-text">{info?.name ?? "…"}</span>
-              <span className="text-hood-muted font-mono">{info?.symbol ?? ""}</span>
+            <div className="flex min-w-0 items-baseline gap-2">
+              <span className="truncate text-lg font-bold text-hood-text">{info?.name ?? "…"}</span>
+              <span className="shrink-0 font-mono text-sm text-hood-muted">{info?.symbol ?? ""}</span>
               {stats && (
                 <span
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                  className={`hd-badge shrink-0 ${
                     stats.graduated
-                      ? "bg-hood-green/20 text-hood-green"
-                      : "bg-yellow-500/20 text-yellow-500"
+                      ? "bg-hood-greenDim text-hood-green"
+                      : "bg-hood-amberDim text-hood-amber"
                   }`}
                 >
                   {stats.graduated ? "DEX" : "CURVE"}
@@ -107,7 +116,7 @@ export function TokenHeader({ tokenAddress }: { tokenAddress: string }) {
             ETH/USD oracle), see /api/tokens/[address]/stats */}
         <Stat
           label="Price"
-          value={stats ? `${formatEth(stats.priceEth)} ETH` : "…"}
+          value={stats ? `${formatTokenPriceEth(stats.priceEth)} ETH` : "…"}
           sub={stats ? formatUsd(stats.priceUsd) : undefined}
         />
 
@@ -181,10 +190,12 @@ function Stat({
   valueClass?: string;
 }) {
   return (
-    <div>
-      <div className="text-[11px] text-hood-muted">{label}</div>
-      <div className={`font-mono font-medium ${valueClass ?? "text-hood-text"}`}>{value}</div>
-      {sub && <div className="text-[10px] text-hood-muted font-mono">{sub}</div>}
+    <div className="min-w-[90px]">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-hood-muted">{label}</div>
+      <div className={`mt-0.5 whitespace-nowrap font-mono text-sm font-semibold ${valueClass ?? "text-hood-text"}`}>
+        {value}
+      </div>
+      {sub && <div className="font-mono text-[11px] text-hood-muted">{sub}</div>}
     </div>
   );
 }

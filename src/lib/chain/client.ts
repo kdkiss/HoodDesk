@@ -14,7 +14,18 @@ export function getPublicClient(chainId?: number): PublicClient {
       nativeCurrency: chain.nativeCurrency,
       rpcUrls: { default: { http: [chain.rpcUrl] } },
     },
-    transport: http(chain.rpcUrl, { batch: true }),
+    transport: http(chain.rpcUrl, {
+      // Robinhood Chain's public RPC occasionally returns an incomplete
+      // JSON-RPC batch while several terminal panels refresh together.
+      // Keep batches deliberately small and retry transient transport
+      // failures instead of surfacing a random 404/500 to the user.
+      batch: { batchSize: 12, wait: 8 },
+      // Higher-level read helpers own retry policy. Disabling transport
+      // retries prevents nested retry multiplication during provider errors.
+      retryCount: 0,
+      retryDelay: 250,
+      timeout: 20_000,
+    }),
   });
   return client;
 }
