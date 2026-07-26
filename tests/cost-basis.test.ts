@@ -102,6 +102,8 @@ describe("computeCostBasis", () => {
     expect(result.hasAnyBuyHistory).toBe(false);
     expect(result.realizedPnlWei).toBe(0n);
     expect(result.trackedTokenQty).toBe(0n);
+    expect(result.netTokenQty).toBe(-500n);
+    expect(result.hasIncompleteHistory).toBe(true);
   });
 
   it("skips a sell after all tracked quantity has already been sold", () => {
@@ -134,6 +136,7 @@ describe("computeCostBasis", () => {
     expect(result.trackedTokenQty).toBe(0n);
     expect(result.costBasisWei).toBe(0n);
     expect(result.realizedPnlWei).toBe(0n);
+    expect(result.hasIncompleteHistory).toBe(true);
   });
 
   it("clamps a sell larger than tracked quantity instead of guessing at the remainder", () => {
@@ -159,6 +162,8 @@ describe("computeCostBasis", () => {
     expect(result.trackedTokenQty).toBe(0n);
     expect(result.costBasisWei).toBe(0n);
     expect(result.realizedPnlWei).toBe(1_000_000_000_000_000_000n - 1_000_000_000_000_000_000n);
+    expect(result.netTokenQty).toBe(-4000n);
+    expect(result.hasIncompleteHistory).toBe(true);
   });
 });
 
@@ -188,13 +193,12 @@ describe("costBasisForHolding", () => {
     expect(result!.costBasisWei).toBe(2_000_000_000_000_000_000n);
   });
 
-  it("prorates cost basis down when tracked quantity exceeds actual balance", () => {
+  it("returns null when the wallet balance is below tracked quantity (untracked disposal)", () => {
     const result = costBasisForHolding(
       { trackedTokenQty: 1000n, costBasisWei: 2_000_000_000_000_000_000n },
       500n // wallet only holds half of what HoodDesk tracked (e.g. moved out)
     );
-    expect(result).not.toBeNull();
-    expect(result!.costBasisWei).toBe(1_000_000_000_000_000_000n);
+    expect(result).toBeNull();
   });
 });
 

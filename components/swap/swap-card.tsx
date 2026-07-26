@@ -22,6 +22,7 @@ import { TokenSelectModal, NATIVE_ETH, type SelectableToken } from "./token-sele
 import { LimitForm } from "./limit-form";
 import { DcaForm } from "./dca-form";
 import { ActiveDcaOrders } from "./active-dca-orders";
+import { trackConfirmedSwap } from "@/src/lib/portfolio/track-swap";
 
 const EXPECTED_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 4663);
 const DEFAULT_SLIPPAGE_BPS = 100;
@@ -95,6 +96,8 @@ export function SwapCard({ fixedTokenAddress }: { fixedTokenAddress?: string } =
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [step, setStep] = useState<Step>("form");
   const [flowError, setFlowError] = useState<string | null>(null);
+  const [trackingWarning, setTrackingWarning] = useState<string | null>(null);
+  const trackedSwapHash = useRef<string | null>(null);
   const [unlimitedApproval, setUnlimitedApproval] = useState(false);
 
   const correctChain = isConnected && chainId === EXPECTED_CHAIN_ID;
@@ -370,7 +373,27 @@ export function SwapCard({ fixedTokenAddress }: { fixedTokenAddress?: string } =
 
   useEffect(() => {
     if (swapReceipt.isSuccess && step === "pending") {
-      setStep(swapReceipt.data.status === "success" ? "confirmed" : "reverted");
+      const confirmed = swapReceipt.data.status === "success";
+      setStep(confirmed ? "confirmed" : "reverted");
+      if (
+        confirmed &&
+        swap.data &&
+        robinfunAddress &&
+        trackedSwapHash.current !== swap.data
+      ) {
+        trackedSwapHash.current = swap.data;
+        setTrackingWarning(null);
+        void trackConfirmedSwap(
+          swap.data,
+          robinfunAddress as Address
+        ).catch((error) => {
+          setTrackingWarning(
+            error instanceof Error
+              ? `Portfolio history was not recorded: ${error.message}`
+              : "Portfolio history was not recorded."
+          );
+        });
+      }
       nativeBalance.refetch();
       sellErc20Balance.refetch();
       allowanceRead.refetch();
@@ -417,6 +440,7 @@ export function SwapCard({ fixedTokenAddress }: { fixedTokenAddress?: string } =
     setQuote(null);
     setQuoteError(null);
     setFlowError(null);
+    setTrackingWarning(null);
     setStep("form");
     swap.reset();
     approve.reset();
@@ -766,6 +790,9 @@ export function SwapCard({ fixedTokenAddress }: { fixedTokenAddress?: string } =
                   : "Transaction failed"}
           </p>
           {flowError && <p className="text-xs text-hood-muted">{flowError}</p>}
+          {step === "confirmed" && trackingWarning && (
+            <p className="text-xs text-hood-muted">{trackingWarning}</p>
+          )}
           {explorerTxUrl && (
             <a href={explorerTxUrl} target="_blank" rel="noopener noreferrer" className="block text-xs font-mono text-hood-green hover:underline">
               {shorten(swap.data!)} - view on Blockscout

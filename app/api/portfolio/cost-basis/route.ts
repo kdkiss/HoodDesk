@@ -77,7 +77,13 @@ export async function GET(req: NextRequest) {
       const actualBalance = balance;
       const tokenTrades = tradesByToken.get(tokenAddr) ?? [];
       const accumulation = computeCostBasis(tokenTrades);
-      const heldCostBasis = costBasisForHolding(accumulation, actualBalance);
+      const historyComplete =
+        accumulation.hasAnyBuyHistory &&
+        !accumulation.hasIncompleteHistory &&
+        actualBalance === accumulation.netTokenQty;
+      const heldCostBasis = historyComplete
+        ? costBasisForHolding(accumulation, actualBalance)
+        : null;
 
       responses.push({
         token: tokenAddr,

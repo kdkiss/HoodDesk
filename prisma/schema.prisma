@@ -48,6 +48,8 @@ model OrderExecution {
   quoteBlockNumber  String?
   expectedOutput    String
   minimumOutput     String
+  actualTokenAmount String?
+  actualEthAmount   String?
   transactionHash   String?
   nonce             String?
   gasEstimate       String?

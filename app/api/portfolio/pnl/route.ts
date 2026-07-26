@@ -98,23 +98,35 @@ export async function GET(req: NextRequest) {
       const actualBalance = balance;
       const tokenTrades = tradesByToken.get(tokenAddr) ?? [];
       const accumulation = computeCostBasis(tokenTrades);
-      const heldCostBasis = costBasisForHolding(accumulation, actualBalance);
+      const historyComplete =
+        accumulation.hasAnyBuyHistory &&
+        !accumulation.hasIncompleteHistory &&
+        actualBalance === accumulation.netTokenQty;
+      const heldCostBasis = historyComplete
+        ? costBasisForHolding(accumulation, actualBalance)
+        : null;
 
       const currentValueWei = await estimateCurrentValueWei(tokenAddr, actualBalance);
-      const unrealizedPnlWei = computeUnrealizedPnl({
-        currentValueWei,
-        costBasisWei: heldCostBasis?.costBasisWei ?? null,
-      });
-
-      const totalPnlWei = (
-        (unrealizedPnlWei ?? 0n) + accumulation.realizedPnlWei
-      );
+      const unrealizedPnlWei =
+        historyComplete && actualBalance === 0n
+          ? 0n
+          : computeUnrealizedPnl({
+              currentValueWei,
+              costBasisWei: heldCostBasis?.costBasisWei ?? null,
+            });
+      const realizedPnlWei = historyComplete
+        ? accumulation.realizedPnlWei
+        : null;
+      const totalPnlWei =
+        unrealizedPnlWei !== null && realizedPnlWei !== null
+          ? unrealizedPnlWei + realizedPnlWei
+          : null;
 
       responses.push({
         token: tokenAddr,
         costBasisEth: heldCostBasis ? formatEther(heldCostBasis.costBasisWei) : null,
         costBasisUsd: null,
-        realizedPnlEth: accumulation.hasAnyBuyHistory ? formatEther(accumulation.realizedPnlWei) : "0",
+        realizedPnlEth: realizedPnlWei !== null ? formatEther(realizedPnlWei) : null,
         realizedPnlUsd: null,
         unrealizedPnlEth: unrealizedPnlWei !== null ? formatEther(unrealizedPnlWei) : null,
         unrealizedPnlUsd: null,

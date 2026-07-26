@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useAccount,
   useBalance,
@@ -19,6 +19,7 @@ import { useNetworkHealth } from "@/src/hooks/use-network-health";
 import { useTokenInfo } from "./use-token-info";
 import { ReviewPanel } from "./review-panel";
 import { parseQuote, type Direction, type FlowStep, type ParsedQuote, type QuoteApiResponse } from "./types";
+import { trackConfirmedSwap } from "@/src/lib/portfolio/track-swap";
 
 const EXPECTED_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 4663);
 const DEFAULT_SLIPPAGE_BPS = 100;
@@ -50,6 +51,8 @@ export function OrderTicket({ tokenAddress: tokenAddressProp }: { tokenAddress?:
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [flowError, setFlowError] = useState<string | null>(null);
+  const [trackingWarning, setTrackingWarning] = useState<string | null>(null);
+  const trackedSwapHash = useRef<string | null>(null);
 
   const correctChain = isConnected && chainId === EXPECTED_CHAIN_ID;
   const tokenValid = isAddress(tokenAddress);
@@ -282,7 +285,27 @@ export function OrderTicket({ tokenAddress: tokenAddressProp }: { tokenAddress?:
 
   useEffect(() => {
     if (swapReceipt.isSuccess && step === "pending") {
-      setStep(swapReceipt.data.status === "success" ? "confirmed" : "reverted");
+      const confirmed = swapReceipt.data.status === "success";
+      setStep(confirmed ? "confirmed" : "reverted");
+      if (
+        confirmed &&
+        swap.data &&
+        tokenValid &&
+        trackedSwapHash.current !== swap.data
+      ) {
+        trackedSwapHash.current = swap.data;
+        setTrackingWarning(null);
+        void trackConfirmedSwap(
+          swap.data,
+          tokenAddress as Address
+        ).catch((error) => {
+          setTrackingWarning(
+            error instanceof Error
+              ? `Portfolio history was not recorded: ${error.message}`
+              : "Portfolio history was not recorded."
+          );
+        });
+      }
       nativeBalance.refetch();
       tokenBalanceRead.refetch();
       allowanceRead.refetch();
@@ -319,6 +342,7 @@ export function OrderTicket({ tokenAddress: tokenAddressProp }: { tokenAddress?:
     setQuote(null);
     setQuoteError(null);
     setFlowError(null);
+    setTrackingWarning(null);
     swap.reset();
     approve.reset();
   }
@@ -688,6 +712,9 @@ export function OrderTicket({ tokenAddress: tokenAddressProp }: { tokenAddress?:
           )}
           {swapReceipt.data && (
             <p className="text-xs text-hood-muted">Gas used: {swapReceipt.data.gasUsed.toString()}</p>
+          )}
+          {trackingWarning && (
+            <p className="text-xs text-hood-muted">{trackingWarning}</p>
           )}
           <button
             onClick={resetFlow}

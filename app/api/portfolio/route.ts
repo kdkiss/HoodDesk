@@ -13,6 +13,7 @@ import {
   computeUnrealizedPnl,
 } from "@/src/lib/portfolio/cost-basis";
 import { getBlockscoutEthUsd } from "@/src/lib/blockscout/market-data";
+import type { PnlUnavailableReason } from "@/src/lib/portfolio/types";
 
 const querySchema = z.object({
   address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
@@ -112,16 +113,33 @@ export async function GET(req: NextRequest) {
 
         const tokenTrades = tradesByToken.get(tokenAddress) ?? [];
         const accumulation = computeCostBasis(tokenTrades);
+        const historyComplete =
+          accumulation.hasAnyBuyHistory &&
+          !accumulation.hasIncompleteHistory &&
+          actualBalance !== null &&
+          actualBalance === accumulation.netTokenQty;
 
         const heldCostBasis =
-          actualBalance !== null ? costBasisForHolding(accumulation, actualBalance) : null;
+          historyComplete && actualBalance !== null
+            ? costBasisForHolding(accumulation, actualBalance)
+            : null;
+        const historyReason =
+          !accumulation.hasAnyBuyHistory
+            ? ("NO_TRACKED_BUYS" as const)
+            : accumulation.hasIncompleteHistory
+              ? ("INCOMPLETE_HISTORY" as const)
+              : actualBalance === null
+              ? ("BALANCE_UNAVAILABLE" as const)
+              : !historyComplete
+                ? ("INCOMPLETE_HISTORY" as const)
+                : null;
 
         const trackedCostBasis = heldCostBasis
           ? { wei: heldCostBasis.costBasisWei.toString(), eth: formatEther(heldCostBasis.costBasisWei) }
           : null;
 
         // Realized P&L is only meaningful once at least one tracked buy exists.
-        const realizedPnl = accumulation.hasAnyBuyHistory
+        const realizedPnl = historyComplete
           ? {
               wei: accumulation.realizedPnlWei.toString(),
               eth: formatEther(accumulation.realizedPnlWei),
@@ -133,6 +151,8 @@ export async function GET(req: NextRequest) {
         // tracked cost basis — if either is unavailable, report null rather
         // than approximate.
         let unrealizedPnl: { wei: string; eth: string } | null = null;
+        let unrealizedPnlUnavailableReason: PnlUnavailableReason | null =
+          historyReason;
         if (heldCostBasis && actualBalance !== null) {
           const currentValueWei = await estimateCurrentValueWei(
             tb.token.address_hash as Address,
@@ -144,6 +164,9 @@ export async function GET(req: NextRequest) {
           });
           if (diff !== null) {
             unrealizedPnl = { wei: diff.toString(), eth: formatEther(diff) };
+            unrealizedPnlUnavailableReason = null;
+          } else {
+            unrealizedPnlUnavailableReason = "PRICE_UNAVAILABLE";
           }
         }
 
@@ -164,6 +187,9 @@ export async function GET(req: NextRequest) {
           realizedPnl,
           unrealizedPnl,
           costBasisUnavailable: !heldCostBasis,
+          costBasisUnavailableReason: heldCostBasis ? null : historyReason,
+          realizedPnlUnavailableReason: realizedPnl ? null : historyReason,
+          unrealizedPnlUnavailableReason,
         };
       })
     );

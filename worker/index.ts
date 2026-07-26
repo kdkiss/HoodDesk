@@ -11,6 +11,7 @@ import {
   assertPriceImpactWithinLimit,
   calculateConstantProductPriceImpactBps,
 } from "../src/lib/dex/price-impact";
+import { deriveSwapAmounts } from "../src/lib/portfolio/swap-receipt";
 import { runTokenDiscovery } from "./token-discovery";
 
 const EXECUTION_ENABLED = process.env.EXECUTION_ENABLED === "true";
@@ -228,6 +229,8 @@ export async function processOrder(order: {
   let v2PricingBlock: bigint | null = null;
   let v2ReserveIn: bigint | null = null;
   let v2ReserveOut: bigint | null = null;
+  let v2PairAddress: Address | null = null;
+  let v2WethTokenIndex: 0 | 1 | null = null;
 
   if (graduated) {
     const pairAddress = meta?.pairAddress;
@@ -270,6 +273,8 @@ export async function processOrder(order: {
     ]);
     const [reserve0, reserve1] = reserves as [bigint, bigint, number];
     const wethIsToken0 = (token0 as Address).toLowerCase() === WETH.toLowerCase();
+    v2PairAddress = pairAddress as Address;
+    v2WethTokenIndex = wethIsToken0 ? 0 : 1;
     const wethReserve = wethIsToken0 ? reserve0 : reserve1;
     const tokenReserve = wethIsToken0 ? reserve1 : reserve0;
     const price = priceEthPerTokenFromReserves(wethReserve, tokenReserve);
@@ -330,13 +335,19 @@ export async function processOrder(order: {
   // Trigger met — lock the order
   await prisma.automatedOrder.update({
     where: { id: order.id },
-    data: { status: "EXECUTING", triggeredAt: new Date() },
+    data: {
+      status: "EXECUTING",
+      triggeredAt: new Date(),
+      executionWallet: account.address.toLowerCase(),
+    },
   });
 
   console.log(`Order ${order.id} triggered at price ${formatEther(currentPrice)}`);
 
   // Build and send transaction
   let txHash: `0x${string}`;
+  let quotedExpectedOutput: bigint;
+  let quotedMinimumOutput: bigint;
   const deadline = BigInt(Math.floor(Date.now() / 1000) + order.deadlineSeconds);
 
   if (graduated) {
@@ -347,6 +358,8 @@ export async function processOrder(order: {
     // Safety buffer: Ensure at least 500 bps (5%) slippage for automated execution to handle Fee-on-Transfer tokens
     const appliedSlippageBps = Math.max(order.maximumSlippageBps, 500);
     const minOut = (expectedOut * BigInt(10000 - appliedSlippageBps)) / 10000n;
+    quotedExpectedOutput = expectedOut;
+    quotedMinimumOutput = minOut;
 
     if (isBuy) {
       txHash = await walletClient.writeContract({
@@ -396,6 +409,8 @@ export async function processOrder(order: {
         args: [tokenOut, amountIn],
       });
       const slippageAdjusted = (minOut * BigInt(10000 - order.maximumSlippageBps)) / 10000n;
+      quotedExpectedOutput = minOut;
+      quotedMinimumOutput = slippageAdjusted;
       txHash = await walletClient.writeContract({
         address: curveFactory,
         abi: ROBINFUN_FACTORY_ABI,
@@ -413,6 +428,8 @@ export async function processOrder(order: {
         args: [tokenIn, amountIn],
       });
       const slippageAdjusted = (minOut * BigInt(10000 - order.maximumSlippageBps)) / 10000n;
+      quotedExpectedOutput = minOut;
+      quotedMinimumOutput = slippageAdjusted;
       // Approve curve factory to pull tokens
       const allowance = await publicClient.readContract({
         address: tokenIn,
@@ -447,8 +464,8 @@ export async function processOrder(order: {
     data: {
       orderId: order.id,
       attempt: 1,
-      expectedOutput: "0",
-      minimumOutput: "0",
+      expectedOutput: quotedExpectedOutput.toString(),
+      minimumOutput: quotedMinimumOutput.toString(),
       transactionHash: txHash,
       status: "PENDING",
     },
@@ -457,9 +474,53 @@ export async function processOrder(order: {
   // Wait for receipt
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
+  let actualAmounts: { tokenAmount: bigint; ethAmount: bigint } | null = null;
+  let accountingError: string | null = null;
+  if (receipt.status === "success") {
+    try {
+      const route = graduated
+        ? {
+            kind: "v2" as const,
+            pairAddress:
+              v2PairAddress ??
+              (() => {
+                throw new Error("V2 pair address is unavailable");
+              })(),
+            wethTokenIndex:
+              v2WethTokenIndex ??
+              (() => {
+                throw new Error("V2 token orientation is unavailable");
+              })(),
+          }
+        : { kind: "curve" as const, factoryAddress: curveFactory };
+      actualAmounts = deriveSwapAmounts({
+        logs: receipt.logs,
+        walletAddress: account.address,
+        tokenAddress: token,
+        side: isBuy ? "buy" : "sell",
+        route,
+        transactionValue: isBuy ? amountIn : 0n,
+      });
+    } catch (error) {
+      accountingError =
+        error instanceof Error ? error.message : "Unable to derive swap amounts";
+      console.warn(
+        `Order ${order.id} confirmed, but receipt accounting is unavailable: ${accountingError}`
+      );
+    }
+  }
+
   await prisma.orderExecution.update({
     where: { id: execution.id },
-    data: { status: receipt.status === "success" ? "CONFIRMED" : "FAILED" },
+    data: {
+      status: receipt.status === "success" ? "CONFIRMED" : "FAILED",
+      actualTokenAmount: actualAmounts?.tokenAmount.toString(),
+      actualEthAmount: actualAmounts?.ethAmount.toString(),
+      errorCode: accountingError ? "ACCOUNTING_UNAVAILABLE" : null,
+      errorMessage: accountingError,
+      gasUsed: receipt.gasUsed.toString(),
+      effectiveGasPrice: receipt.effectiveGasPrice.toString(),
+    },
   });
 
   // Record the attempt, but leave the final status to the caller — the

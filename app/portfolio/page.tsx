@@ -5,6 +5,7 @@ import { useAccount } from "wagmi";
 import { PortfolioAnalystPanel } from "@/components/ai/portfolio-analyst-panel";
 import {
   type PortfolioMoneyAmount,
+  type PnlUnavailableReason,
   type PortfolioResponse,
 } from "@/src/lib/portfolio/types";
 
@@ -16,9 +17,26 @@ function formatEth(value: string | null): string {
   return `${n.toFixed(6)} ETH`;
 }
 
-function PnlCell({ pnl }: { pnl: PortfolioMoneyAmount | null }) {
+const UNAVAILABLE_LABELS: Record<PnlUnavailableReason, string> = {
+  NO_TRACKED_BUYS: "No verified buy history",
+  INCOMPLETE_HISTORY: "Tracked trades do not reconcile to the wallet balance",
+  BALANCE_UNAVAILABLE: "Onchain balance is unavailable",
+  PRICE_UNAVAILABLE: "A live sell quote is unavailable",
+};
+
+function PnlCell({
+  pnl,
+  reason,
+}: {
+  pnl: PortfolioMoneyAmount | null;
+  reason?: PnlUnavailableReason | null;
+}) {
   if (!pnl) {
-    return <span className="text-hood-muted">Unavailable</span>;
+    return (
+      <span className="text-hood-muted" title={reason ? UNAVAILABLE_LABELS[reason] : undefined}>
+        Unavailable
+      </span>
+    );
   }
   const n = Number(pnl.eth);
   const color = n > 0 ? "text-hood-green" : n < 0 ? "text-hood-red" : "text-hood-muted";
@@ -125,7 +143,8 @@ export default function PortfolioPage() {
           <div className="text-xs text-hood-muted max-w-3xl">
             Cost basis is derived only from trades executed or recorded through HoodDesk.
             Tokens acquired before tracking began, or transferred in from elsewhere, show
-            &quot;Cost basis unavailable&quot; instead of an estimated figure.
+            &quot;Cost basis unavailable&quot; instead of an estimated figure. P&amp;L
+            excludes gas and network fees.
           </div>
 
           {portfolio.holdings.length === 0 ? (
@@ -163,7 +182,16 @@ export default function PortfolioPage() {
                         </td>
                         <td className="text-right">
                           {h.costBasisUnavailable ? (
-                            <span className="hd-badge-muted">Unavailable</span>
+                            <span
+                              className="hd-badge-muted"
+                              title={
+                                h.costBasisUnavailableReason
+                                  ? UNAVAILABLE_LABELS[h.costBasisUnavailableReason]
+                                  : undefined
+                              }
+                            >
+                              Unavailable
+                            </span>
                           ) : (
                             <span className="font-mono">
                               {formatEth(h.trackedCostBasis?.eth ?? null)}
@@ -171,10 +199,16 @@ export default function PortfolioPage() {
                           )}
                         </td>
                         <td className="text-right">
-                          <PnlCell pnl={h.realizedPnl} />
+                          <PnlCell
+                            pnl={h.realizedPnl}
+                            reason={h.realizedPnlUnavailableReason}
+                          />
                         </td>
                         <td className="pr-4 text-right">
-                          <PnlCell pnl={h.unrealizedPnl} />
+                          <PnlCell
+                            pnl={h.unrealizedPnl}
+                            reason={h.unrealizedPnlUnavailableReason}
+                          />
                         </td>
                       </tr>
                     ))}

@@ -41,6 +41,12 @@ export interface PortfolioMoneyAmount {
   eth: string;
 }
 
+export type PnlUnavailableReason =
+  | "NO_TRACKED_BUYS"
+  | "INCOMPLETE_HISTORY"
+  | "BALANCE_UNAVAILABLE"
+  | "PRICE_UNAVAILABLE";
+
 export interface PortfolioHolding {
   token: {
     address: string;
@@ -55,6 +61,9 @@ export interface PortfolioHolding {
   realizedPnl: PortfolioMoneyAmount | null;
   unrealizedPnl: PortfolioMoneyAmount | null;
   costBasisUnavailable: boolean;
+  costBasisUnavailableReason?: PnlUnavailableReason | null;
+  realizedPnlUnavailableReason?: PnlUnavailableReason | null;
+  unrealizedPnlUnavailableReason?: PnlUnavailableReason | null;
 }
 
 export interface PortfolioResponse {
