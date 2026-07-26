@@ -8,7 +8,7 @@ export interface TokenStats {
   graduated: boolean;
   priceEth: string;
   priceUsd: number | null;
-  ethUsd: number;
+  ethUsd: number | null;
   change24hPct: number | null;
   liquidityEth: string;
   liquidityUsd: number | null;
@@ -16,6 +16,9 @@ export interface TokenStats {
   marketCapUsd: number | null;
   holdersCount: number | null;
   totalSupply: string | null;
+  totalSupplyTokens: string | null;
+  decimals: number;
+  marketDataSource: string | null;
   curve: {
     realEth: string;
     raiseTarget: string;

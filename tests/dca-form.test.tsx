@@ -18,6 +18,13 @@ vi.mock("@/components/trading/use-token-info", () => ({
   useTokenInfo: vi.fn(() => ({ data: undefined, isLoading: false })),
 }));
 
+vi.mock("@/components/trading/use-token-stats", () => ({
+  useTokenStats: vi.fn(() => ({
+    data: { priceEth: "0.0001205" },
+    isLoading: false,
+  })),
+}));
+
 vi.mock("@/components/swap/token-select-modal", () => ({
   TokenSelectModal: ({ open }: { open: boolean }) => {
     if (!open) return null;
@@ -72,4 +79,39 @@ it("changes duration unit via select", async () => {
 
   await user.selectOptions(durationSelect, "weeks");
   expect((durationSelect as HTMLSelectElement).value).toBe("weeks");
+});
+
+it("fills the DCA price condition from the last ETH price", async () => {
+  const user = userEvent.setup();
+  render(<DcaForm />);
+
+  await user.click(screen.getByRole("button", { name: /Use last:/ }));
+
+  expect(screen.getByLabelText("Max price (ETH per token)")).toHaveValue(
+    "0.0001205"
+  );
+  expect(screen.getByText(/not USD/)).toBeInTheDocument();
+});
+
+it("fills buy DCA caps below the last price", async () => {
+  const user = userEvent.setup();
+  render(<DcaForm />);
+
+  await user.click(screen.getByRole("button", { name: "-5%" }));
+
+  expect(screen.getByLabelText("Max price (ETH per token)")).toHaveValue(
+    "0.000114475"
+  );
+});
+
+it("fills sell DCA floors above the last price", async () => {
+  const user = userEvent.setup();
+  render(<DcaForm />);
+
+  await user.click(screen.getByRole("button", { name: "Sell DCA" }));
+  await user.click(screen.getByRole("button", { name: "+10%" }));
+
+  expect(screen.getByLabelText("Min price (ETH per token)")).toHaveValue(
+    "0.00013255"
+  );
 });

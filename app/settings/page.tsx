@@ -7,6 +7,7 @@ import {
   DEX_FACTORY,
 } from "@/src/config/contracts";
 import { getChain } from "@/src/config/chains";
+import { AiSettingsCard } from "@/components/ai/ai-settings-card";
 
 interface HealthResponse {
   status: string;
@@ -130,6 +131,8 @@ export default function SettingsPage() {
             requires updating the deployment environment; no in-app override exists yet.
           </p>
         </section>
+
+        <AiSettingsCard />
 
         {/* Automated Execution */}
         <section className="hd-card p-5">

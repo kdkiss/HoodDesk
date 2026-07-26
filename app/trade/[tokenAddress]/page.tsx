@@ -8,8 +8,10 @@ import { CandlestickChart } from "@/components/trading/candlestick-chart";
 import { RecentTrades } from "@/components/trading/recent-trades";
 import { SwapCard } from "@/components/swap/swap-card";
 import { getChain } from "@/src/config/chains";
+import { TokenAnalystPanel } from "@/components/ai/token-analyst-panel";
+import { TokenHolders } from "@/components/trading/token-holders";
 
-type Tab = "trades" | "info";
+type Tab = "trades" | "holders" | "analyst" | "info";
 
 export default function TokenTerminalPage({
   params,
@@ -30,55 +32,69 @@ export default function TokenTerminalPage({
   }
 
   return (
-    <div className="px-3 pt-2 pb-4 space-y-2">
-      {/* Header row: stats + switcher */}
-      <div className="flex items-start gap-3">
+    <div className="mx-auto max-w-[1920px] space-y-3 p-3 md:p-4">
+      {/* Market context */}
+      <section className="flex flex-col gap-3 rounded-2xl border border-hood-border bg-hood-panel px-4 py-3 shadow-card sm:flex-row sm:items-start">
         <div className="flex-1 min-w-0">
           <TokenHeader tokenAddress={tokenAddress} />
         </div>
-        <div>
+        <div className="shrink-0">
           <TokenSwitcher currentAddress={tokenAddress} />
         </div>
-      </div>
+      </section>
 
       {/* Main grid: chart + tabs left, swap right */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-3">
-        <div className="space-y-2 min-w-0">
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_380px] 2xl:grid-cols-[minmax(0,1fr)_400px]">
+        <div className="min-w-0 space-y-3">
           <div className="bg-hood-panel border border-hood-border rounded-2xl overflow-hidden shadow-card">
             <CandlestickChart tokenAddress={tokenAddress} />
           </div>
 
           <div className="bg-hood-panel border border-hood-border rounded-2xl overflow-hidden shadow-card">
-            <div className="flex border-b border-hood-border bg-hood-bg/50">
-              {(["trades", "info"] as Tab[]).map((t) => (
+            <div
+              role="tablist"
+              aria-label="Token terminal details"
+              className="flex border-b border-hood-border bg-hood-well/30 px-2"
+            >
+              {(["trades", "holders", "analyst", "info"] as Tab[]).map((t) => (
                 <button
                   key={t}
                   onClick={() => setTab(t)}
-                  className={`px-5 py-3 text-xs uppercase tracking-wider transition-colors relative ${
+                  role="tab"
+                  aria-selected={tab === t}
+                  className={`relative min-h-11 px-4 text-xs font-semibold transition-colors ${
                     tab === t
-                      ? "text-hood-green font-bold"
+                      ? "text-hood-green"
                       : "text-hood-muted hover:text-hood-text"
                   }`}
                 >
                   {tab === t && (
                     <span className="absolute bottom-0 left-0 w-full h-[2px] bg-hood-green rounded-t-sm" />
                   )}
-                  {t === "trades" ? "Trades" : "Info"}
+                  {t === "trades"
+                    ? "Trades"
+                    : t === "holders"
+                      ? "Holders"
+                      : t === "analyst"
+                        ? "Analyst"
+                        : "Info"}
                 </button>
               ))}
             </div>
             <div className={tab === "trades" ? "" : "hidden"}>
               <RecentTradesBare tokenAddress={tokenAddress} />
             </div>
+            {tab === "holders" && <TokenHolders tokenAddress={tokenAddress} />}
+            {tab === "analyst" && <TokenAnalystPanel tokenAddress={tokenAddress} />}
             {tab === "info" && <TokenInfoPanel tokenAddress={tokenAddress} />}
           </div>
         </div>
 
-        <div className="min-w-0">
-          <div className="lg:sticky lg:top-2">
+        <aside className="min-w-0">
+          <div className="xl:sticky xl:top-3">
             <SwapCard fixedTokenAddress={tokenAddress} />
           </div>
-        </div>
+        </aside>
       </div>
     </div>
   );
@@ -88,7 +104,7 @@ export default function TokenTerminalPage({
  *  reuse it as-is but strip the duplicate outer padding via a wrapper. */
 function RecentTradesBare({ tokenAddress }: { tokenAddress: string }) {
   return (
-    <div className="[&>div]:border-0 [&>div]:rounded-none [&>div]:p-3">
+    <div className="[&>div]:rounded-none [&>div]:border-0 [&>div]:p-3 md:[&>div]:p-4">
       <RecentTrades tokenAddress={tokenAddress} />
     </div>
   );

@@ -12,6 +12,7 @@ import {
   costBasisForHolding,
   computeUnrealizedPnl,
 } from "@/src/lib/portfolio/cost-basis";
+import { getBlockscoutEthUsd } from "@/src/lib/blockscout/market-data";
 
 const querySchema = z.object({
   address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
@@ -64,12 +65,13 @@ export async function GET(req: NextRequest) {
   try {
     const client = getPublicClient(chainId);
 
-    const [ethBalance, tokenBalances, trackedTrades] = await Promise.all([
+    const [ethBalance, tokenBalances, trackedTrades, ethUsd] = await Promise.all([
       client.getBalance({ address }),
       blockscoutGet<BlockscoutTokenBalance[]>(
         `/addresses/${address}/token-balances`
       ).catch(() => []),
       getWalletTrackedTrades(address.toLowerCase(), chainId).catch(() => []),
+      getBlockscoutEthUsd().catch(() => null),
     ]);
 
     const tokenBalanceList = Array.isArray(tokenBalances) ? tokenBalances : [];
@@ -170,6 +172,7 @@ export async function GET(req: NextRequest) {
       address,
       ethBalance: ethBalance.toString(),
       ethBalanceFormatted: formatEther(ethBalance),
+      ethUsd,
       holdings,
     });
   } catch (err) {

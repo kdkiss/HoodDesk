@@ -6,6 +6,7 @@ import { ROBINFUN_TOKEN_ABI } from "../abi/robinfun-token";
 import { getDefaultDex } from "../registry";
 import type { SwapQuote, SwapRoute, TokenInfo, LiquidityPool } from "../types";
 import { isAllowlistedContract } from "../allowlist";
+import { retryRpcRead } from "@/src/lib/chain/retry";
 
 export class RobinFunV2Adapter {
   id = "robinfun-v2";
@@ -13,6 +14,56 @@ export class RobinFunV2Adapter {
 
   private client = getPublicClient();
   private dex = getDefaultDex();
+  private pairTokensCache = new Map<
+    string,
+    Promise<{ token0: Address; token1: Address }>
+  >();
+
+  async getPairTokens(pair: Address): Promise<{ token0: Address; token1: Address }> {
+    const key = pair.toLowerCase();
+    const cached = this.pairTokensCache.get(key);
+    if (cached) return cached;
+
+    const request = retryRpcRead(async () => {
+      const [token0, token1] = await Promise.all([
+        this.client.readContract({
+          address: pair,
+          abi: [
+            {
+              type: "function",
+              name: "token0",
+              stateMutability: "view",
+              inputs: [],
+              outputs: [{ name: "", type: "address" }],
+            },
+          ] as const,
+          functionName: "token0",
+        }),
+        this.client.readContract({
+          address: pair,
+          abi: [
+            {
+              type: "function",
+              name: "token1",
+              stateMutability: "view",
+              inputs: [],
+              outputs: [{ name: "", type: "address" }],
+            },
+          ] as const,
+          functionName: "token1",
+        }),
+      ]);
+      return { token0: token0 as Address, token1: token1 as Address };
+    });
+
+    this.pairTokensCache.set(key, request);
+    try {
+      return await request;
+    } catch (error) {
+      this.pairTokensCache.delete(key);
+      throw error;
+    }
+  }
 
   async getTokenInfo(token: Address): Promise<TokenInfo> {
     const [name, symbol, decimals, totalSupply, dexLive, pair, factory] = await Promise.all([
@@ -39,58 +90,35 @@ export class RobinFunV2Adapter {
   }
 
   async getPairReserves(pair: Address): Promise<LiquidityPool> {
-    const [token0, token1, reserves] = await Promise.all([
-      this.client.readContract({
-        address: pair,
-        abi: [
-          {
-            type: "function",
-            name: "token0",
-            stateMutability: "view",
-            inputs: [],
-            outputs: [{ name: "", type: "address" }],
-          },
-        ] as const,
-        functionName: "token0",
-      }),
-      this.client.readContract({
-        address: pair,
-        abi: [
-          {
-            type: "function",
-            name: "token1",
-            stateMutability: "view",
-            inputs: [],
-            outputs: [{ name: "", type: "address" }],
-          },
-        ] as const,
-        functionName: "token1",
-      }),
-      this.client.readContract({
-        address: pair,
-        abi: [
-          {
-            type: "function",
-            name: "getReserves",
-            stateMutability: "view",
-            inputs: [],
-            outputs: [
-              { name: "reserve0", type: "uint112" },
-              { name: "reserve1", type: "uint112" },
-              { name: "blockTimestampLast", type: "uint32" },
-            ],
-          },
-        ] as const,
-        functionName: "getReserves",
-      }),
+    const [{ token0, token1 }, reserves] = await Promise.all([
+      this.getPairTokens(pair),
+      retryRpcRead(() =>
+        this.client.readContract({
+          address: pair,
+          abi: [
+            {
+              type: "function",
+              name: "getReserves",
+              stateMutability: "view",
+              inputs: [],
+              outputs: [
+                { name: "reserve0", type: "uint112" },
+                { name: "reserve1", type: "uint112" },
+                { name: "blockTimestampLast", type: "uint32" },
+              ],
+            },
+          ] as const,
+          functionName: "getReserves",
+        })
+      ),
     ]);
 
     const [reserve0, reserve1] = reserves as [bigint, bigint, number];
 
     return {
       address: pair,
-      token0: token0 as Address,
-      token1: token1 as Address,
+      token0,
+      token1,
       reserve0,
       reserve1,
       totalSupply: 0n, // not needed for quotes

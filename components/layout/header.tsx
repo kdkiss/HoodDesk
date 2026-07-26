@@ -30,8 +30,8 @@ export function Header() {
 
   return (
     <header className="flex flex-col border-b border-hood-border bg-hood-panel/80 backdrop-blur-sm">
-      <div className="flex items-center justify-between px-4 py-2 gap-4">
-        <div className="flex items-center gap-5 text-xs">
+      <div className="flex items-center justify-between gap-3 px-3 py-2 sm:px-4">
+        <div className="min-w-0 flex items-center gap-5 text-xs">
           <div className="flex items-center gap-1.5">
             <span
               className={`w-1.5 h-1.5 rounded-full ${statusColor} ${isFetching ? "animate-pulse" : ""}`}
@@ -40,16 +40,18 @@ export function Header() {
             <span className="text-hood-muted">{statusLabel}</span>
           </div>
 
-          <StatusItem label="Network" value={health?.chainName ?? "-"} />
-          <StatusItem label="Block" value={health?.blockNumber ?? "-"} mono />
-          <StatusItem
-            label="Gas"
-            value={health ? `${health.gasPriceGwei} gwei` : "-"}
-            mono
-          />
+          <div className="hidden items-center gap-5 sm:flex">
+            <StatusItem label="Network" value={health?.chainName ?? "-"} />
+            <StatusItem label="Block" value={health?.blockNumber ?? "-"} mono />
+            <StatusItem
+              label="Gas"
+              value={health ? `${health.gasPriceGwei} gwei` : "-"}
+              mono
+            />
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <ThemeToggle />
           <ConnectWallet />
         </div>

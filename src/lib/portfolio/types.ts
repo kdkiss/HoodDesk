@@ -35,3 +35,32 @@ export interface TransactionData {
   tokenAmount: bigint; // raw token units
   timestamp: Date;
 }
+
+export interface PortfolioMoneyAmount {
+  wei: string;
+  eth: string;
+}
+
+export interface PortfolioHolding {
+  token: {
+    address: string;
+    name: string;
+    symbol: string;
+    decimals: number;
+  };
+  balanceFormatted: string;
+  estimatedMarketValue: string | null;
+  valueUsd: string | null;
+  trackedCostBasis: PortfolioMoneyAmount | null;
+  realizedPnl: PortfolioMoneyAmount | null;
+  unrealizedPnl: PortfolioMoneyAmount | null;
+  costBasisUnavailable: boolean;
+}
+
+export interface PortfolioResponse {
+  address: string;
+  ethBalance: string;
+  ethBalanceFormatted: string;
+  ethUsd: number | null;
+  holdings: PortfolioHolding[];
+}

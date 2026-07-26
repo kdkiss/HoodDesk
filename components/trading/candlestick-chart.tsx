@@ -11,19 +11,30 @@ import {
   type UTCTimestamp,
   ColorType,
   CrosshairMode,
+  LineType,
+  PriceScaleMode,
   type MouseEventParams,
+  type Time,
 } from "lightweight-charts";
 import { useTheme } from "@/components/theme/theme-provider";
+import { useTokenInfo } from "@/components/trading/use-token-info";
+import {
+  CHART_RESOLUTION_OPTIONS,
+  CHART_TIMEFRAME_OPTIONS,
+  DEFAULT_CHART_RESOLUTION,
+  DEFAULT_CHART_TIMEFRAME,
+  chartResolutionConfig,
+  type ChartResolution,
+  type ChartTimeframe,
+} from "@/src/lib/chart/timeframes";
 
-type TimeRange = "5M" | "15M" | "1H" | "1D" | "1W" | "1M" | "3M" | "1Y";
-
-const RANGES: TimeRange[] = ["5M", "15M", "1H", "1D", "1W", "1M", "3M", "1Y"];
 const LIVE_POLL_MS = 15_000;
 const LIVE_POLL_SHORT_MS = 5_000;
 
 interface CandleResponse {
   token: string;
-  range: TimeRange;
+  timeframe: ChartTimeframe;
+  resolution: ChartResolution;
   graduated: boolean;
   candles: Array<{
     time: number;
@@ -32,9 +43,17 @@ interface CandleResponse {
     low: number;
     close: number;
     volume: number;
+    observed: boolean;
   }>;
   insufficientData: boolean;
   message?: string;
+  metric?: "marketCapUsd" | "marketCapEth" | "priceEth";
+  unit?: "USD" | "ETH";
+  ethUsd?: number | null;
+  bucketSeconds?: number;
+  observedCandles?: number;
+  source?: "blockscout" | "rpc";
+  truncated?: boolean;
 }
 
 interface LegendData {
@@ -48,21 +67,10 @@ interface LegendData {
 
 const NOT_AVAILABLE_MESSAGE = "Historical chart data is not yet available for this market.";
 
-function computeSMA(values: number[], period: number): (number | null)[] {
-  const result: (number | null)[] = [];
-  for (let i = 0; i < values.length; i++) {
-    if (i < period - 1) {
-      result.push(null);
-      continue;
-    }
-    let sum = 0;
-    for (let j = i - period + 1; j <= i; j++) sum += values[j];
-    result.push(sum / period);
-  }
-  return result;
+function shouldUseLineChart(candles: CandleResponse["candles"]): boolean {
+  return candles.length < 2;
 }
 
-/** Pick a sensible decimal precision for very small ETH-denominated prices. */
 function precisionForPrice(price: number): { precision: number; minMove: number } {
   if (price >= 1) return { precision: 4, minMove: 0.0001 };
   if (price >= 0.0001) return { precision: 8, minMove: 0.00000001 };
@@ -70,12 +78,35 @@ function precisionForPrice(price: number): { precision: number; minMove: number 
   return { precision: 18, minMove: 0.000000000000000001 };
 }
 
-function formatPrice(v: number, precision: number): string {
-  if (v === 0) return "0";
-  if (v >= 1) return v.toFixed(4);
-  // For tiny values use precision digits, trimmed of trailing zeros
-  const s = v.toFixed(Math.min(precision, 18));
-  return s.replace(/\.?0+$/, "");
+function formatCompactNumber(value: number, fractionDigits = 2): string {
+  const absolute = Math.abs(value);
+  if (absolute >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(fractionDigits)}B`;
+  if (absolute >= 1_000_000) return `${(value / 1_000_000).toFixed(fractionDigits)}M`;
+  if (absolute >= 1_000) return `${(value / 1_000).toFixed(fractionDigits)}K`;
+  return value.toFixed(fractionDigits);
+}
+
+function formatChartValue(value: number, unit: "USD" | "ETH"): string {
+  if (!Number.isFinite(value)) return "-";
+  if (unit === "USD") return `$${formatCompactNumber(value)}`;
+  if (value >= 1) return `${value.toFixed(4)} ETH`;
+  const { precision } = precisionForPrice(value);
+  return `${value.toFixed(Math.min(precision, 18)).replace(/\.?0+$/, "")} ETH`;
+}
+
+function formatAxisValue(value: number, unit: "USD" | "ETH"): string {
+  if (unit === "USD") return `$${formatCompactNumber(value, 1)}`;
+  if (value >= 1_000) return formatCompactNumber(value, 1);
+  if (value >= 1) return value.toFixed(2);
+  const { precision } = precisionForPrice(value);
+  return value.toFixed(Math.min(precision, 18)).replace(/\.?0+$/, "");
+}
+
+function formatInterval(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3_600) return `${seconds / 60}m`;
+  if (seconds < 86_400) return `${seconds / 3_600}h`;
+  return `${seconds / 86_400}d`;
 }
 
 function formatTime(ts: number, showSeconds: boolean): string {
@@ -95,40 +126,55 @@ function formatTime(ts: number, showSeconds: boolean): string {
   });
 }
 
+function formatAxisTime(time: Time, timeframe: ChartTimeframe): string {
+  if (typeof time !== "number") return "";
+  const date = new Date(time * 1000);
+  if (timeframe === "1D" || timeframe === "5D") {
+    return date.toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
   const { theme } = useTheme();
+  const tokenInfoQuery = useTokenInfo(tokenAddress);
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
-  const maSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const priceLineSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const candlesByTimeRef = useRef<Map<number, LegendData>>(new Map());
+  const timeframeRef = useRef<ChartTimeframe>(DEFAULT_CHART_TIMEFRAME);
 
-  const [range, setRange] = useState<TimeRange>("1D");
+  const [timeframe, setTimeframe] = useState<ChartTimeframe>(
+    DEFAULT_CHART_TIMEFRAME
+  );
+  const [resolution, setResolution] = useState<ChartResolution>(
+    DEFAULT_CHART_RESOLUTION
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [insufficientData, setInsufficientData] = useState(false);
   const [legend, setLegend] = useState<LegendData | null>(null);
-  const [lastPrice, setLastPrice] = useState<number | null>(null);
-  const [precision, setPrecision] = useState(8);
-  const [totalSupply, setTotalSupply] = useState<number | null>(null);
-
-  // Fetch totalSupply once per token for market cap display
-  useEffect(() => {
-    if (!tokenAddress) return;
-    let cancelled = false;
-    fetch(`/api/tokens/${tokenAddress}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        const supply = data?.totalSupply ? Number(data.totalSupply) : null;
-        if (supply && Number.isFinite(supply) && supply > 0) setTotalSupply(supply);
-        else setTotalSupply(null);
-      })
-      .catch(() => !cancelled && setTotalSupply(null));
-    return () => {
-      cancelled = true;
-    };
-  }, [tokenAddress]);
+  const [latestCandle, setLatestCandle] = useState<LegendData | null>(null);
+  const [rangeOpenPrice, setRangeOpenPrice] = useState<number | null>(null);
+  const [metric, setMetric] = useState<
+    "marketCapUsd" | "marketCapEth" | "priceEth"
+  >("priceEth");
+  const [unit, setUnit] = useState<"USD" | "ETH">("ETH");
+  const [bucketSeconds, setBucketSeconds] = useState(
+    chartResolutionConfig(DEFAULT_CHART_RESOLUTION).bucketSeconds
+  );
+  const [observedCandles, setObservedCandles] = useState(0);
+  const [ethUsd, setEthUsd] = useState<number | null>(null);
+  const [truncated, setTruncated] = useState(false);
+  const [logScale, setLogScale] = useState(false);
 
   // Initialize chart once.
   useEffect(() => {
@@ -136,57 +182,66 @@ export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
 
     const chart = createChart(containerRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: "#0b0c0f" },
-        textColor: "#8b919e",
+        background: { type: ColorType.Solid, color: "#111722" },
+        textColor: "#94a0b2",
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
         fontSize: 11,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: "rgba(255,255,255,0.02)" },
-        horzLines: { color: "rgba(255,255,255,0.04)" },
+        vertLines: { color: "rgba(132, 150, 176, 0.09)" },
+        horzLines: { color: "rgba(132, 150, 176, 0.09)" },
       },
       width: containerRef.current.clientWidth,
       height: containerRef.current.clientHeight,
+      localization: {
+        timeFormatter: (time: Time) =>
+          formatAxisTime(time, timeframeRef.current),
+      },
       timeScale: {
         timeVisible: true,
-        secondsVisible: true,
-        borderColor: "#1a1d24",
+        secondsVisible: false,
+        borderColor: "rgba(132, 150, 176, 0.14)",
         fixLeftEdge: true,
         fixRightEdge: true,
-        rightOffset: 4,
-        barSpacing: 8,
+        rightOffset: 2,
+        barSpacing: 6,
+        minBarSpacing: 2,
+        lockVisibleTimeRangeOnResize: true,
+        tickMarkFormatter: (time: Time) =>
+          formatAxisTime(time, timeframeRef.current),
       },
       rightPriceScale: {
-        borderColor: "#1a1d24",
-        scaleMargins: { top: 0.06, bottom: 0.18 },
+        borderVisible: false,
+        scaleMargins: { top: 0.08, bottom: 0.24 },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
         vertLine: {
-          color: "rgba(0,209,143,0.35)",
+          color: "rgba(148, 160, 178, 0.45)",
           width: 1,
           style: 2,
-          labelBackgroundColor: "#1a1d24",
+          labelBackgroundColor: "#252c39",
         },
         horzLine: {
-          color: "rgba(0,209,143,0.35)",
+          color: "rgba(148, 160, 178, 0.45)",
           width: 1,
           style: 2,
-          labelBackgroundColor: "#1a1d24",
+          labelBackgroundColor: "#252c39",
         },
       },
+      handleScale: true,
       handleScroll: { vertTouchDrag: false },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#00d18f",
-      downColor: "#f6465d",
+      upColor: "#00bfa5",
+      downColor: "#f23645",
       borderVisible: false,
-      wickUpColor: "#00d18f",
-      wickDownColor: "#f6465d",
+      wickUpColor: "#00bfa5",
+      wickDownColor: "#f23645",
       priceLineVisible: true,
-      priceLineColor: "#3b82f6",
+      priceLineColor: "#00bfa5",
       priceLineWidth: 1,
       priceLineStyle: 2,
     });
@@ -194,26 +249,31 @@ export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
     const volumeSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: "volume" },
       priceScaleId: "volume",
-      color: "#3B82F6",
+      color: "#00bfa5",
       lastValueVisible: false,
       priceLineVisible: false,
     });
     volumeSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.82, bottom: 0 },
+      scaleMargins: { top: 0.78, bottom: 0 },
     });
 
-    const maSeries = chart.addSeries(LineSeries, {
-      color: "#F5A623",
+    const priceLineSeries = chart.addSeries(LineSeries, {
+      color: "#00bfa5",
       lineWidth: 2,
-      crosshairMarkerVisible: false,
-      lastValueVisible: false,
-      priceLineVisible: false,
+      lineType: LineType.WithSteps,
+      crosshairMarkerVisible: true,
+      crosshairMarkerRadius: 3,
+      lastValueVisible: true,
+      priceLineVisible: true,
+      priceLineColor: "#00bfa5",
+      priceLineWidth: 1,
+      priceLineStyle: 2,
     });
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
-    maSeriesRef.current = maSeries;
+    priceLineSeriesRef.current = priceLineSeries;
 
     // Crosshair legend
     chart.subscribeCrosshairMove((param: MouseEventParams) => {
@@ -221,16 +281,14 @@ export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
         setLegend(null);
         return;
       }
-      const candle = param.seriesData.get(candleSeries) as
-        | { time: UTCTimestamp; open: number; high: number; low: number; close: number }
-        | undefined;
+      const candle = candlesByTimeRef.current.get(Number(param.time));
       const volume = param.seriesData.get(volumeSeries) as { value: number } | undefined;
       if (!candle) {
         setLegend(null);
         return;
       }
       setLegend({
-        time: candle.time as number,
+        time: candle.time,
         open: candle.open,
         high: candle.high,
         low: candle.low,
@@ -256,7 +314,8 @@ export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
-      maSeriesRef.current = null;
+      priceLineSeriesRef.current = null;
+      candlesByTimeRef.current.clear();
     };
   }, []);
 
@@ -269,59 +328,103 @@ export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
 
     chart.applyOptions({
       layout: {
-        background: { type: ColorType.Solid, color: isDark ? "#0b0c0f" : "#ffffff" },
-        textColor: isDark ? "#8b919e" : "#546275",
+        background: { type: ColorType.Solid, color: isDark ? "#111722" : "#f8fafc" },
+        textColor: isDark ? "#94a0b2" : "#526176",
       },
       grid: {
-        vertLines: { color: isDark ? "rgba(255,255,255,0.02)" : "rgba(20,27,38,0.05)" },
-        horzLines: { color: isDark ? "rgba(255,255,255,0.04)" : "rgba(20,27,38,0.07)" },
+        vertLines: {
+          color: isDark
+            ? "rgba(132, 150, 176, 0.09)"
+            : "rgba(54, 71, 96, 0.10)",
+        },
+        horzLines: {
+          color: isDark
+            ? "rgba(132, 150, 176, 0.09)"
+            : "rgba(54, 71, 96, 0.10)",
+        },
       },
-      timeScale: { borderColor: isDark ? "#1a1d24" : "#d3dbe5" },
-      rightPriceScale: { borderColor: isDark ? "#1a1d24" : "#d3dbe5" },
+      timeScale: {
+        borderColor: isDark
+          ? "rgba(132, 150, 176, 0.14)"
+          : "rgba(54, 71, 96, 0.18)",
+      },
       crosshair: {
-        vertLine: { labelBackgroundColor: isDark ? "#1a1d24" : "#d3dbe5" },
-        horzLine: { labelBackgroundColor: isDark ? "#1a1d24" : "#d3dbe5" },
+        vertLine: { labelBackgroundColor: isDark ? "#252c39" : "#526176" },
+        horzLine: { labelBackgroundColor: isDark ? "#252c39" : "#526176" },
       },
     });
   }, [theme]);
 
-  const applyCandles = useCallback((candles: CandleResponse["candles"]) => {
-    if (candles.length === 0) return;
+  const applyCandles = useCallback(
+    (candles: CandleResponse["candles"], valueUnit: "USD" | "ETH") => {
+      if (candles.length === 0) return;
 
-    // Auto precision from the last close
-    const last = candles[candles.length - 1];
-    const { precision: p, minMove } = precisionForPrice(last.close);
-    setPrecision(p);
-    candleSeriesRef.current?.applyOptions({
-      priceFormat: { type: "price", precision: p, minMove },
-    });
+      const last = candles[candles.length - 1];
+      const { precision, minMove } = precisionForPrice(last.close);
+      candleSeriesRef.current?.applyOptions({
+        priceFormat:
+          valueUnit === "USD"
+            ? {
+                type: "custom",
+                minMove: 0.01,
+                formatter: (value: number) => formatAxisValue(value, "USD"),
+              }
+            : { type: "price", precision, minMove },
+      });
+      priceLineSeriesRef.current?.applyOptions({
+        priceFormat:
+          valueUnit === "USD"
+            ? {
+                type: "custom",
+                minMove: 0.01,
+                formatter: (value: number) => formatAxisValue(value, "USD"),
+              }
+            : { type: "price", precision, minMove },
+      });
 
-    const candleData = candles.map((c) => ({
-      time: c.time as UTCTimestamp,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    }));
+      const candleData = candles.map((candle) => ({
+        time: candle.time as UTCTimestamp,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+      }));
 
-    const volumeData = candles.map((c) => ({
-      time: c.time as UTCTimestamp,
-      value: c.volume,
-      color: c.close >= c.open ? "rgba(0,209,143,0.45)" : "rgba(246,70,93,0.45)",
-    }));
+      const volumeData = candles.map((candle) => ({
+        time: candle.time as UTCTimestamp,
+        value: candle.volume,
+        color:
+          candle.close >= candle.open
+            ? "rgba(0, 191, 165, 0.50)"
+            : "rgba(242, 54, 69, 0.50)",
+      }));
 
-    const closes = candles.map((c) => c.close);
-    const maPeriod = Math.min(20, Math.max(2, Math.floor(closes.length / 4)));
-    const smaValues = computeSMA(closes, maPeriod);
-    const maData = candles
-      .map((c, i) => ({ time: c.time as UTCTimestamp, value: smaValues[i] }))
-      .filter((d): d is { time: UTCTimestamp; value: number } => d.value !== null);
-
-    candleSeriesRef.current?.setData(candleData);
-    volumeSeriesRef.current?.setData(volumeData);
-    maSeriesRef.current?.setData(maData);
-    setLastPrice(last.close);
-  }, []);
+      const lineData = candles.map((candle) => ({
+        time: candle.time as UTCTimestamp,
+        value: candle.close,
+      }));
+      const useLine = shouldUseLineChart(candles);
+      candleSeriesRef.current?.setData(useLine ? [] : candleData);
+      priceLineSeriesRef.current?.setData(useLine ? lineData : []);
+      volumeSeriesRef.current?.setData(volumeData);
+      candlesByTimeRef.current = new Map(
+        candles.map((candle) => [
+          candle.time,
+          {
+            time: candle.time,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+          },
+        ])
+      );
+      setLatestCandle(candlesByTimeRef.current.get(last.time) ?? null);
+      setRangeOpenPrice(candles[0].open);
+    },
+    []
+  );
 
   const loadCandles = useCallback(
     async (opts: { silent?: boolean } = {}) => {
@@ -329,7 +432,12 @@ export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
       if (!opts.silent) setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/candles?token=${tokenAddress}&range=${range}`);
+        const query = new URLSearchParams({
+          token: tokenAddress,
+          timeframe,
+          resolution,
+        });
+        const res = await fetch(`/api/candles?${query.toString()}`);
         const data: CandleResponse = await res.json();
         if (!res.ok) {
           throw new Error(
@@ -341,13 +449,32 @@ export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
           setInsufficientData(true);
           candleSeriesRef.current?.setData([]);
           volumeSeriesRef.current?.setData([]);
-          maSeriesRef.current?.setData([]);
-          setLastPrice(null);
+          priceLineSeriesRef.current?.setData([]);
+          candlesByTimeRef.current.clear();
+          setLegend(null);
+          setLatestCandle(null);
+          setRangeOpenPrice(null);
+          setObservedCandles(0);
+          setBucketSeconds(
+            data.bucketSeconds ??
+              chartResolutionConfig(resolution).bucketSeconds
+          );
+          setTruncated(Boolean(data.truncated));
+          setEthUsd(null);
           return;
         }
 
+        const nextUnit = data.unit ?? "ETH";
         setInsufficientData(false);
-        applyCandles(data.candles);
+        setMetric(data.metric ?? "priceEth");
+        setUnit(nextUnit);
+        setBucketSeconds(
+          data.bucketSeconds ?? chartResolutionConfig(resolution).bucketSeconds
+        );
+        setObservedCandles(data.observedCandles ?? data.candles.length);
+        setEthUsd(data.ethUsd ?? null);
+        setTruncated(Boolean(data.truncated));
+        applyCandles(data.candles, nextUnit);
         if (!opts.silent) chartRef.current?.timeScale().fitContent();
       } catch (e) {
         if (!opts.silent) {
@@ -358,129 +485,253 @@ export function CandlestickChart({ tokenAddress }: { tokenAddress: string }) {
         if (!opts.silent) setLoading(false);
       }
     },
-    [tokenAddress, range, applyCandles]
+    [tokenAddress, timeframe, resolution, applyCandles]
   );
 
   useEffect(() => {
     loadCandles();
   }, [loadCandles]);
 
-  // Live polling — refresh silently and update the last bar in place.
-  // Short windows (5M/15M) poll more aggressively so the live bar feels alive.
+  // Live polling refreshes short candle intervals more aggressively.
   useEffect(() => {
     if (!tokenAddress) return;
-    const pollMs = range === "5M" || range === "15M" ? LIVE_POLL_SHORT_MS : LIVE_POLL_MS;
+    const pollMs =
+      resolution === "1" || resolution === "5"
+        ? LIVE_POLL_SHORT_MS
+        : LIVE_POLL_MS;
     const id = setInterval(() => {
       loadCandles({ silent: true });
     }, pollMs);
     return () => clearInterval(id);
-  }, [tokenAddress, range, loadCandles]);
+  }, [tokenAddress, resolution, loadCandles]);
 
-  // Derive market cap from lastPrice * totalSupply (display units × display units).
-  const marketCapEth =
-    lastPrice !== null && totalSupply !== null && totalSupply > 0
-      ? lastPrice * totalSupply
-      : null;
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    timeframeRef.current = timeframe;
+    chart.timeScale().applyOptions({ secondsVisible: false });
+  }, [timeframe]);
 
-  const showSeconds = range === "5M" || range === "15M";
+  useEffect(() => {
+    chartRef.current?.priceScale("right").applyOptions({
+      mode: logScale ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
+      autoScale: true,
+    });
+  }, [logScale]);
 
-  // % change between first and last candle in the visible dataset
-  const displayed = legend;
+  const resetView = useCallback(() => {
+    chartRef.current?.priceScale("right").applyOptions({ autoScale: true });
+    chartRef.current?.timeScale().fitContent();
+  }, []);
+
+  // Use the latest real candle while the crosshair is idle.
+  const displayed = legend ?? latestCandle;
   const pctChange =
-    displayed && displayed.open > 0 ? ((displayed.close - displayed.open) / displayed.open) * 100 : null;
+    displayed && rangeOpenPrice && rangeOpenPrice > 0
+      ? ((displayed.close - rangeOpenPrice) / rangeOpenPrice) * 100
+      : null;
   const isUp = pctChange !== null && pctChange >= 0;
+  const symbol = tokenInfoQuery.data?.symbol ?? "TOKEN";
+  const metricLabel =
+    metric === "marketCapUsd" || metric === "marketCapEth"
+      ? "Market Cap"
+      : "Price";
 
   return (
     <div>
-      <div className="flex items-center justify-between px-4 py-3 border-b border-hood-border bg-hood-well/50">
-        <h2 className="text-xs font-semibold text-hood-text uppercase tracking-widest">Chart</h2>
-        <div className="flex gap-0.5 bg-hood-bg rounded-xl p-0.5 border border-hood-border shadow-inner">
-          {RANGES.map((r) => (
-            <button
-              key={r}
-              onClick={() => setRange(r)}
-              className={`px-2.5 py-1 text-[11px] rounded-lg font-medium transition-all ${
-                range === r
-                  ? "bg-hood-green text-black shadow-sm"
-                  : "text-hood-muted hover:text-hood-text"
-              }`}
-            >
-              {r}
-            </button>
-          ))}
+      <div className="border-b border-hood-border bg-hood-panel px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="order-1 flex min-w-0 items-center gap-2 xl:order-none">
+            <span
+              className="h-2 w-2 shrink-0 rounded-full bg-hood-green shadow-[0_0_0_5px_rgba(0,209,143,0.12)]"
+              title="Live indexed market data"
+            />
+            <h2 className="truncate text-sm font-semibold text-hood-text">
+              {symbol}/WETH
+              <span className="font-normal text-hood-muted"> ({metricLabel})</span>
+            </h2>
+            <span className="shrink-0 font-mono text-[11px] text-hood-muted">
+              {formatInterval(bucketSeconds)}
+            </span>
+          </div>
+
+          {displayed && (
+            <div className="order-3 flex w-full min-w-0 flex-none items-center gap-x-2 overflow-x-auto whitespace-nowrap pb-1 font-mono text-[11px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden xl:order-none xl:w-auto xl:flex-1 xl:flex-wrap xl:pb-0">
+              <span className="hidden text-hood-muted sm:inline">
+                {formatTime(displayed.time, false)}
+              </span>
+              <ChartLegendValue label="O" value={formatChartValue(displayed.open, unit)} />
+              <ChartLegendValue label="H" value={formatChartValue(displayed.high, unit)} />
+              <ChartLegendValue label="L" value={formatChartValue(displayed.low, unit)} />
+              <ChartLegendValue label="C" value={formatChartValue(displayed.close, unit)} />
+              {pctChange !== null && (
+                <span className={isUp ? "text-hood-green" : "text-hood-red"}>
+                  {isUp ? "+" : ""}
+                  {pctChange.toFixed(2)}%
+                </span>
+              )}
+            </div>
+          )}
+
+          <div
+            className="order-2 flex w-full max-w-full shrink-0 justify-between gap-0.5 overflow-x-auto rounded-lg border border-hood-border bg-hood-bg/70 p-0.5 xl:order-none xl:ml-auto xl:w-auto xl:justify-start"
+            aria-label="Candle interval"
+          >
+            {CHART_RESOLUTION_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => setResolution(option.id)}
+                aria-pressed={resolution === option.id}
+                className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  resolution === option.id
+                    ? "bg-hood-green text-black"
+                    : "text-hood-muted hover:bg-hood-well hover:text-hood-text"
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[10px] text-hood-muted">
+          <span>{observedCandles.toLocaleString()} traded intervals</span>
+          <span>·</span>
+          <span>
+            {truncated
+              ? "high-volume history may be capped by the indexer"
+              : "gaps mean no indexed trade in that interval"}
+          </span>
+          {metric === "marketCapUsd" && ethUsd !== null && (
+            <>
+              <span>·</span>
+              <span>
+                USD values use the current indexed ETH/USD rate of{" "}
+                {ethUsd.toLocaleString(undefined, {
+                  style: "currency",
+                  currency: "USD",
+                  maximumFractionDigits: 2,
+                })}
+              </span>
+            </>
+          )}
+          {truncated && (
+            <>
+              <span>·</span>
+              <span className="text-hood-amber">partial indexed history</span>
+            </>
+          )}
         </div>
       </div>
 
-      <div className="relative" style={{ height: 420 }}>
-        <div ref={containerRef} className="w-full h-full" />
+      <div className="relative h-[380px] bg-hood-panel md:h-[440px] xl:h-[500px]">
+        <div ref={containerRef} className="h-full w-full" />
 
-        {/* Dexscreener-style OHLC / market-cap legend overlay */}
-        {!insufficientData && !loading && !error && tokenAddress && (
-          <div className="absolute top-2 left-3 pointer-events-none z-10 font-mono text-[11px] leading-tight">
-            <div className="flex items-baseline gap-3 flex-wrap">
-              <span className="text-hood-muted">{formatTime(displayed?.time ?? 0, showSeconds)}</span>
-              {displayed ? (
-                <>
-                  <span>
-                    <span className="text-hood-muted">O </span>
-                    <span className={displayed.close >= displayed.open ? "text-hood-green" : "text-hood-red"}>
-                      {formatPrice(displayed.open, precision)}
-                    </span>
-                  </span>
-                  <span>
-                    <span className="text-hood-muted">H </span>
-                    <span className="text-hood-green">{formatPrice(displayed.high, precision)}</span>
-                  </span>
-                  <span>
-                    <span className="text-hood-muted">L </span>
-                    <span className="text-hood-red">{formatPrice(displayed.low, precision)}</span>
-                  </span>
-                  <span>
-                    <span className="text-hood-muted">C </span>
-                    <span className={displayed.close >= displayed.open ? "text-hood-green" : "text-hood-red"}>
-                      {formatPrice(displayed.close, precision)}
-                    </span>
-                  </span>
-                  {pctChange !== null && (
-                    <span className={isUp ? "text-hood-green" : "text-hood-red"}>
-                      {isUp ? "+" : ""}
-                      {pctChange.toFixed(2)}%
-                    </span>
-                  )}
-                  <span className="text-hood-muted">Vol {displayed.volume.toFixed(4)} ETH</span>
-                </>
-              ) : lastPrice !== null ? (
-                <>
-                  <span className="text-hood-text font-semibold">{formatPrice(lastPrice, precision)} ETH</span>
-                  {marketCapEth !== null && (
-                    <span className="text-hood-muted">MCap {marketCapEth.toFixed(2)} ETH</span>
-                  )}
-                </>
-              ) : null}
+        {!insufficientData && !loading && !error && displayed && (
+          <div className="pointer-events-none absolute left-3 top-2 z-10 font-mono text-[11px]">
+            <span className="text-hood-muted">Volume </span>
+            <span
+              className={
+                displayed.close >= displayed.open
+                  ? "text-hood-green"
+                  : "text-hood-red"
+              }
+            >
+              {displayed.volume < 0.0001
+                ? displayed.volume.toPrecision(3)
+                : displayed.volume.toFixed(4)}{" "}
+              ETH
+            </span>
+          </div>
+        )}
+
+        {!insufficientData && !loading && !error && (
+          <div className="absolute inset-x-2 bottom-1.5 z-10 flex items-center justify-between gap-2 text-[10px] text-hood-muted">
+            <div
+              className="flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-md bg-hood-panel/90 p-0.5 backdrop-blur-sm [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              aria-label="Visible time frame"
+            >
+              {[...CHART_TIMEFRAME_OPTIONS].reverse().map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => setTimeframe(option.id)}
+                  aria-pressed={timeframe === option.id}
+                  className={`shrink-0 rounded px-2 py-1 font-medium transition-colors ${
+                    timeframe === option.id
+                      ? "bg-hood-greenDim text-hood-green"
+                      : "hover:bg-hood-well hover:text-hood-text"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1 rounded-md bg-hood-panel/90 p-0.5 backdrop-blur-sm">
+              <button
+                type="button"
+                onClick={() => setLogScale((enabled) => !enabled)}
+                aria-pressed={logScale}
+                className={`rounded px-2 py-1 transition-colors ${
+                  logScale
+                    ? "bg-hood-greenDim text-hood-green"
+                    : "hover:bg-hood-well hover:text-hood-text"
+                }`}
+              >
+                log
+              </button>
+              <button
+                type="button"
+                onClick={resetView}
+                className="rounded px-2 py-1 transition-colors hover:bg-hood-well hover:text-hood-text"
+              >
+                auto
+              </button>
             </div>
           </div>
         )}
 
         {(insufficientData || !tokenAddress) && !loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-hood-panel/90">
-            <p className="text-hood-muted text-sm text-center px-6">
+          <div className="absolute inset-0 flex items-center justify-center bg-hood-panel/95">
+            <p className="px-6 text-center text-sm text-hood-muted">
               {tokenAddress ? NOT_AVAILABLE_MESSAGE : "Enter a token address to load chart data."}
             </p>
           </div>
         )}
 
         {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-hood-panel/90">
-            <p className="text-hood-muted text-sm">Loading chart...</p>
+          <div className="absolute inset-0 flex items-center justify-center bg-hood-panel/95">
+            <div className="w-48 space-y-2" aria-label="Loading chart">
+              <div className="h-2 animate-pulse rounded bg-hood-well" />
+              <div className="h-2 w-3/4 animate-pulse rounded bg-hood-well" />
+            </div>
           </div>
         )}
 
         {error && !loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-hood-panel/90">
-            <p className="text-hood-red text-sm text-center px-6">{error}</p>
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-hood-panel/95 px-6 text-center">
+            <p className="text-sm text-hood-red">{error}</p>
+            <button
+              type="button"
+              onClick={() => loadCandles()}
+              className="hd-btn-ghost mt-3 px-3 py-1.5 text-xs"
+            >
+              Try again
+            </button>
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+function ChartLegendValue({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="shrink-0">
+      <span className="text-hood-muted">{label} </span>
+      <span className="text-hood-text">{value}</span>
+    </span>
   );
 }

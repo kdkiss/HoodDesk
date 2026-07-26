@@ -99,12 +99,12 @@ The first start downloads and builds the app, so it may take a few minutes. Dock
 3. Connect a dedicated low-balance wallet and confirm it is on Robinhood Chain.
 4. Explore first. If you test a swap, use an amount you are fully prepared to lose and review the wallet confirmation carefully.
 
-To stop HoodDesk, run `docker compose down` from the `HoodDesk` folder. Your local database stays in the `prisma` folder unless you delete it yourself.
+To stop HoodDesk, run `docker compose down` from the `HoodDesk` folder. Docker keeps your local database in the `hooddesk-data` volume. Do not run `docker compose down -v` unless you deliberately want to delete that database.
 
 ### Docker troubleshooting
 
 - If `docker` is “not recognized” or Docker cannot connect, open Docker Desktop, wait until it reports that it is running, then retry.
-- If automated order creation fails with `Unable to verify authorization` and the web logs mention `attempt to write a readonly database`, restart with `docker compose up -d --build`. HoodDesk includes a small startup permission fix for the local SQLite database in `prisma/dev.db`.
+- If automated order creation fails with `Unable to verify authorization`, run `docker compose logs web worker` and confirm both services are using the same database. Docker stores that database in the `hooddesk-data` volume so Linux and NAS file permissions do not make SQLite read-only.
 - If [http://localhost:3000](http://localhost:3000) is unavailable, run `docker compose ps` to check that the containers are running. Another app may already be using port 3000.
 - Never share your `.env` file, wallet recovery phrase, private key, or API keys.
 
@@ -117,7 +117,7 @@ git pull
 docker compose up -d --build
 ```
 
-Your `.env` file and local database are not replaced by `git pull`.
+Your `.env` file and Docker database are not replaced by `git pull`. When upgrading from an older HoodDesk version, the worker copies an existing `prisma/dev.db` into the Docker volume only if the volume does not already contain a database. The original file remains untouched as a backup.
 
 ## Independent project
 
@@ -343,21 +343,25 @@ The complete template is [`.env.example`](.env.example). Common settings:
 | Variable | Purpose |
 |---|---|
 | `NEXT_PUBLIC_CHAIN_ID` | Network selection; defaults to Robinhood Chain mainnet (`4663`). |
-| `BLOCKSCOUT_API_KEY` | Recommended API key for Blockscout-backed data. |
+| `BLOCKSCOUT_API_KEY` | Recommended Blockscout PRO API key for faster indexed data. |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | Optional WalletConnect integration. |
 | `DATABASE_URL` | Prisma database connection; SQLite is the development default. |
 | `TOKEN_DISCOVERY_ENABLED` | Enables read-only background token discovery. |
 | `EXECUTION_ENABLED` | Must be `true` before the worker can sign automated orders. |
 | `AUTOMATED_ORDERS_ENABLED` | Must also be `true` before the app accepts automated orders. |
 | `EXECUTION_PRIVATE_KEY` | Private key for the dedicated execution wallet; keep secret. |
+| `EXECUTION_WALLET_ADDRESS` | Public address for the dedicated worker wallet; used by the web status page without exposing its private key. |
 | `EMERGENCY_PAUSE` | Stops the worker from signing automated trades when set to `true`. |
+| `TRUST_PROXY_HEADERS` | Set to `true` only behind a controlled proxy that overwrites client-IP headers. |
 | `DEFAULT_SLIPPAGE_BPS`, `MAX_SLIPPAGE_BPS` | Fallback quote slippage and the maximum allowed automated-order slippage. |
 
 `NEXT_PUBLIC_RPC_URL`, `ROBINHOOD_CHAIN_RPC_URL`, and the contract-address fields in `.env.example` are reserved for future configuration support. Changing them does not currently change HoodDesk’s routes or RPC endpoint.
 
 ## Docker deployment notes
 
-The Docker Desktop walkthrough above is the recommended way to run HoodDesk locally. For a hosted deployment, use a public HTTPS URL, place the app behind a TLS-terminating reverse proxy, keep the database volume and configuration private, and do not put a funded execution key in a broadly shared `.env` file.
+The Docker Desktop walkthrough above is the recommended way to run HoodDesk locally. Docker Compose overrides `DATABASE_URL` with `file:/app/data/dev.db` and stores that file in the named `hooddesk-data` volume shared by the web app and worker. `docker compose down` preserves it; `docker compose down -v` deletes it.
+
+For a hosted deployment, use a public HTTPS URL, place the app behind a TLS-terminating reverse proxy, and keep the database volume and configuration private. Docker Compose passes `EXECUTION_PRIVATE_KEY` only to the worker; do not add it to the web service.
 
 ## Checks before reporting a beta issue
 

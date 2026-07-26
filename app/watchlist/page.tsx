@@ -11,6 +11,7 @@ interface WatchlistToken {
   dexLive: boolean;
   isRobinFun: boolean;
   priceEth?: string | null;
+  change24hPct?: number | null;
 }
 
 interface WatchlistEntry {
@@ -31,6 +32,13 @@ function formatEthPrice(value: string | null | undefined) {
     ? price.toFixed(12).replace(/0+$/, "").replace(/\.$/, "")
     : price.toPrecision(6);
   return `${formatted} ETH`;
+}
+
+function formatChange(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "-";
+  }
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
 export default function WatchlistPage() {
@@ -73,7 +81,15 @@ export default function WatchlistPage() {
       setEntries(watchlist.map((entry) => ({
         ...entry,
         token: entry.token
-          ? { ...entry.token, priceEth: byAddress.get(entry.tokenAddress.toLowerCase())?.priceEth ?? null }
+          ? {
+              ...entry.token,
+              priceEth:
+                byAddress.get(entry.tokenAddress.toLowerCase())?.priceEth ??
+                null,
+              change24hPct:
+                byAddress.get(entry.tokenAddress.toLowerCase())
+                  ?.change24hPct ?? null,
+            }
           : null,
       })));
       window.localStorage.setItem(STORAGE_KEY, address);
@@ -182,10 +198,22 @@ export default function WatchlistPage() {
                       {formatEthPrice(entry.token?.priceEth)}
                     </td>
                     <td
-                      className="text-right text-hood-muted"
-                      title="24-hour change is unavailable until a reliable on-chain trade history exists."
+                      className={`text-right font-mono tabular-nums ${
+                        entry.token?.change24hPct === null ||
+                        entry.token?.change24hPct === undefined
+                          ? "text-hood-muted"
+                          : entry.token.change24hPct >= 0
+                            ? "text-hood-green"
+                            : "text-hood-red"
+                      }`}
+                      title={
+                        entry.token?.change24hPct === null ||
+                        entry.token?.change24hPct === undefined
+                          ? "No reliable onchain price was available at the 24-hour boundary."
+                          : "Change from the onchain price at the 24-hour boundary."
+                      }
                     >
-                      -
+                      {formatChange(entry.token?.change24hPct)}
                     </td>
                     <td className="font-mono text-hood-muted">
                       <a

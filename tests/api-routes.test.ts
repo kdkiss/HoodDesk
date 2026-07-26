@@ -58,6 +58,11 @@ const blockscoutMock = vi.hoisted(() => ({
   blockscoutGet: vi.fn(),
 }));
 
+const marketPriceMock = vi.hoisted(() => ({
+  getLivePriceEth: vi.fn(),
+  getPriceChanges24h: vi.fn(),
+}));
+
 vi.mock("@/src/lib/db", () => ({ prisma: prismaMock }));
 vi.mock("@/src/lib/security/rate-limit", () => ({
   checkRateLimit: securityMock.checkRateLimit,
@@ -69,6 +74,7 @@ vi.mock("@/src/lib/security/authorization", () => ({
 vi.mock("@/src/lib/dex", () => dexMock);
 vi.mock("@/src/lib/chain/client", () => chainMock);
 vi.mock("@/src/lib/blockscout/client", () => blockscoutMock);
+vi.mock("@/src/lib/market-price", () => marketPriceMock);
 vi.mock("viem/accounts", () => ({
   privateKeyToAccount: vi.fn(() => ({ address: validOwner })),
 }));
@@ -89,6 +95,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   securityMock.checkRateLimit.mockReturnValue(null);
   securityMock.verifyAndConsumeAuthSignature.mockResolvedValue({ valid: true });
+  marketPriceMock.getLivePriceEth.mockResolvedValue("2");
+  marketPriceMock.getPriceChanges24h.mockResolvedValue([12.5]);
   process.env.NEXT_PUBLIC_CHAIN_ID = "4663";
   process.env.AUTOMATED_ORDERS_ENABLED = "true";
   process.env.EXECUTION_WALLET_ADDRESS = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -165,7 +173,7 @@ describe("emergency API", () => {
 
 describe("health API", () => {
   it("returns health details without an execution key", async () => {
-    delete process.env.EXECUTION_PRIVATE_KEY;
+    delete process.env.EXECUTION_WALLET_ADDRESS;
     chainMock.getPublicClient.mockReturnValue({
       getBlockNumber: vi.fn().mockResolvedValue(123n),
       getGasPrice: vi.fn().mockResolvedValue(1_000_000_000n),
@@ -306,11 +314,56 @@ describe("tokens API", () => {
   });
 
   it("lists RobinFun tokens from the database", async () => {
-    prismaMock.tokenMetadata.findMany.mockResolvedValue([{ address: validTokenIn }]);
+    prismaMock.tokenMetadata.findMany.mockResolvedValue([{
+      address: validTokenIn,
+      dexLive: false,
+      pairAddress: null,
+      factoryAddress: validOwner,
+      decimals: 18,
+    }]);
     const { GET } = await import("../app/api/tokens/route");
     const res = await GET(req("http://test/api/tokens"));
     expect(res.status).toBe(200);
-    expect((await json(res)).tokens).toHaveLength(1);
+    const tokens = (await json(res)).tokens as Array<Record<string, unknown>>;
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      priceEth: "2",
+      change24hPct: 12.5,
+    });
+  });
+
+  it("enriches a newly discovered exact-address result consistently", async () => {
+    prismaMock.tokenMetadata.findUnique.mockResolvedValue(null);
+    dexMock.getTokenInfo.mockResolvedValue({
+      address: validTokenIn,
+      name: "New Token",
+      symbol: "NEW",
+      decimals: 18,
+      creator: validOwner,
+      isRobinFun: true,
+      dexLive: false,
+      pairAddress: null,
+    });
+    prismaMock.tokenMetadata.upsert.mockResolvedValue({
+      address: validTokenIn,
+      name: "New Token",
+      symbol: "NEW",
+      decimals: 18,
+      isRobinFun: true,
+      dexLive: false,
+      pairAddress: null,
+      factoryAddress: validOwner,
+    });
+
+    const { GET } = await import("../app/api/tokens/route");
+    const res = await GET(req(`http://test/api/tokens?address=${validTokenIn}`));
+
+    expect(res.status).toBe(200);
+    expect((await json(res)).token).toMatchObject({
+      symbol: "NEW",
+      priceEth: "2",
+      change24hPct: 12.5,
+    });
   });
 });
 
