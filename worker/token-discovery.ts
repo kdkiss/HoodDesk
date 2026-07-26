@@ -3,6 +3,7 @@ import { prisma } from "../src/lib/db";
 import { ROBINFUN_FACTORY_ABI } from "../src/lib/dex/abi/robinfun-factory";
 import { ROBINFUN_TOKEN_ABI } from "../src/lib/dex/abi/robinfun-token";
 import { ROBINFUN_FACTORIES } from "../src/config/contracts";
+import { getBlockscoutTokenMarketData } from "../src/lib/blockscout/market-data";
 
 // Concurrency cap for onchain reads during enumeration/metadata fetch.
 // Robinhood Chain RPC has not been load-tested for burst eth_call volume,
@@ -120,9 +121,13 @@ async function upsertTokenMetadata(
   chainId: number
 ) {
   const address = token.toLowerCase();
-  const existing = await prisma.tokenMetadata.findUnique({ where: { address } });
-
-  const curveState = await readCurveState(client, factory, token);
+  const [existing, curveState, indexedMarket] = await Promise.all([
+    prisma.tokenMetadata.findUnique({ where: { address } }),
+    readCurveState(client, factory, token),
+    getBlockscoutTokenMarketData(address, { timeoutMs: 5_000 }).catch(
+      () => null
+    ),
+  ]);
 
   // name/symbol/decimals are immutable for an ERC-20; only fetch once.
   let name = existing?.name;
@@ -146,6 +151,11 @@ async function upsertTokenMetadata(
   if (name === undefined || symbol === undefined || decimals === undefined) {
     throw new Error(`Incomplete ERC-20 metadata for token ${token}`);
   }
+  const volume24hUsd =
+    indexedMarket?.volume24hUsd === null ||
+    indexedMarket?.volume24hUsd === undefined
+      ? existing?.volume24hUsd ?? undefined
+      : String(indexedMarket.volume24hUsd);
 
   let pairAddress: string | undefined = existing?.pairAddress ?? undefined;
   if (curveState.graduated && !pairAddress) {
@@ -172,6 +182,7 @@ async function upsertTokenMetadata(
       dexLive: curveState.graduated,
       pairAddress,
       totalSupply,
+      volume24hUsd,
       factoryAddress: factory.toLowerCase(),
       chainId,
     },
@@ -186,6 +197,7 @@ async function upsertTokenMetadata(
       dexLive: curveState.graduated,
       pairAddress,
       totalSupply,
+      volume24hUsd,
       factoryAddress: factory.toLowerCase(),
     },
   });

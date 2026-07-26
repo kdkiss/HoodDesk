@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getSwapQuote } from "@/src/lib/dex";
 import { type Address } from "viem";
 import { checkRateLimit, RATE_LIMITS } from "@/src/lib/security/rate-limit";
+import { env } from "@/src/config/env";
 
 const bodySchema = z.object({
   tokenIn: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
@@ -29,6 +30,14 @@ export async function POST(req: NextRequest) {
       BigInt(amountIn),
       slippageBps ?? Number(process.env.DEFAULT_SLIPPAGE_BPS ?? 100)
     );
+    if (quote.estimatedPriceImpactBps > env.MAX_PRICE_IMPACT_BPS) {
+      return NextResponse.json(
+        {
+          error: `Price impact too high (${(quote.estimatedPriceImpactBps / 100).toFixed(2)}% exceeds ${(env.MAX_PRICE_IMPACT_BPS / 100).toFixed(2)}%)`,
+        },
+        { status: 422 }
+      );
+    }
 
     return NextResponse.json({
       quote: {

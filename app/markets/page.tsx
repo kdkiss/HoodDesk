@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useAccount, useSignMessage } from "wagmi";
 import { generateAuthMessage } from "@/src/lib/security/signature";
-import { Star, Search } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Star, Search } from "lucide-react";
 
 interface Token {
   address: string;
@@ -14,7 +14,10 @@ interface Token {
   dexLive: boolean;
   priceEth?: string | null;
   change24hPct?: number | null;
+  volume24hUsd?: number | null;
 }
+
+type VolumeSort = "none" | "desc" | "asc";
 
 function mergeTokens(primary: Token[], additional: Token[]) {
   const merged = new Map<string, Token>();
@@ -42,6 +45,24 @@ function formatChange(value: number | null | undefined) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
+const volumeFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  notation: "compact",
+  maximumFractionDigits: 2,
+});
+
+function validVolume(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+function formatVolume(value: number | null | undefined) {
+  const volume = validVolume(value);
+  return volume === null ? "-" : volumeFormatter.format(volume);
+}
+
 export default function MarketsPage() {
   const { address } = useAccount();
   const { signMessageAsync } = useSignMessage();
@@ -50,6 +71,7 @@ export default function MarketsPage() {
   const [search, setSearch] = useState("");
   const [watched, setWatched] = useState<Set<string>>(new Set());
   const [watchlistOnly, setWatchlistOnly] = useState(false);
+  const [volumeSort, setVolumeSort] = useState<VolumeSort>("none");
   const [watchError, setWatchError] = useState<string | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
 
@@ -210,12 +232,31 @@ export default function MarketsPage() {
         t.address.toLowerCase().includes(search.toLowerCase())
     )
     .filter((t) => !watchlistOnly || watched.has(t.address.toLowerCase()));
+  const displayed =
+    volumeSort === "none"
+      ? filtered
+      : [...filtered].sort((a, b) => {
+          const aVolume = validVolume(a.volume24hUsd);
+          const bVolume = validVolume(b.volume24hUsd);
+          if (aVolume === null && bVolume === null) return 0;
+          if (aVolume === null) return 1;
+          if (bVolume === null) return -1;
+          return volumeSort === "desc"
+            ? bVolume - aVolume
+            : aVolume - bVolume;
+        });
+
+  function toggleVolumeSort() {
+    setVolumeSort((current) =>
+      current === "none" ? "desc" : current === "desc" ? "asc" : "none"
+    );
+  }
 
   return (
     <div className="hd-page">
       <div className="flex items-center justify-between mb-6">
         <h1 className="hd-h1">Markets</h1>
-        <span className="text-xs text-hood-muted">{filtered.length} tokens</span>
+        <span className="text-xs text-hood-muted">{displayed.length} tokens</span>
       </div>
 
       <div className="flex flex-wrap gap-2 mb-4 items-center">
@@ -265,7 +306,7 @@ export default function MarketsPage() {
               <div key={i} className="h-12 bg-hood-well/50 rounded-lg animate-pulse-soft" />
             ))}
           </div>
-        ) : filtered.length === 0 ? (
+        ) : displayed.length === 0 ? (
           <div className="p-12 text-center">
             <p className="text-hood-muted text-sm">
               {watchlistOnly
@@ -287,11 +328,38 @@ export default function MarketsPage() {
                   <th>Status</th>
                   <th className="text-right">Price (ETH)</th>
                   <th className="text-right">24h Change</th>
+                  <th
+                    className="text-right"
+                    aria-sort={
+                      volumeSort === "none"
+                        ? "none"
+                        : volumeSort === "desc"
+                          ? "descending"
+                          : "ascending"
+                    }
+                  >
+                    <button
+                      type="button"
+                      onClick={toggleVolumeSort}
+                      className="ml-auto inline-flex items-center gap-1 text-hood-muted transition-colors hover:text-hood-text"
+                      aria-label="Sort by 24-hour volume"
+                      title="24-hour USD volume indexed by Blockscout"
+                    >
+                      24h Volume
+                      {volumeSort === "desc" ? (
+                        <ArrowDown className="h-3 w-3" />
+                      ) : volumeSort === "asc" ? (
+                        <ArrowUp className="h-3 w-3" />
+                      ) : (
+                        <ArrowUpDown className="h-3 w-3" />
+                      )}
+                    </button>
+                  </th>
                   <th className="pr-4 text-right">Address</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((token) => {
+                {displayed.map((token) => {
                   const isWatched = watched.has(token.address.toLowerCase());
                   return (
                     <tr key={token.address}>
@@ -346,6 +414,16 @@ export default function MarketsPage() {
                         }
                       >
                         {formatChange(token.change24hPct)}
+                      </td>
+                      <td
+                        className="font-mono text-right tabular-nums text-hood-muted"
+                        title={
+                          validVolume(token.volume24hUsd) === null
+                            ? "Blockscout does not currently provide indexed 24-hour volume for this token."
+                            : "24-hour USD volume indexed by Blockscout."
+                        }
+                      >
+                        {formatVolume(token.volume24hUsd)}
                       </td>
                       <td className="pr-4 font-mono text-hood-muted text-right">
                         <a

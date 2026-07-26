@@ -28,6 +28,7 @@ beforeEach(() => {
               dexLive: false,
               priceEth: "0.000000002",
               change24hPct: 0,
+              volume24hUsd: 100,
             },
           ],
         }),
@@ -54,6 +55,7 @@ beforeEach(() => {
               dexLive: true,
               priceEth: "0.000000070286347532",
               change24hPct: 2.1591,
+              volume24hUsd: 500,
             },
           ],
         }),
@@ -71,6 +73,7 @@ beforeEach(() => {
             dexLive: true,
             priceEth: "0.000000008806296842",
             change24hPct: 0.4247,
+            volume24hUsd: 250,
           },
         }),
       } as Response;
@@ -116,4 +119,27 @@ it("merges watched tokens that fall outside the general market page", async () =
 
   expect(screen.getByText("Robinfun")).toBeInTheDocument();
   expect(screen.queryByText("Latest Token")).not.toBeInTheDocument();
+});
+
+it("shows Blockscout volume and sorts available values in either direction", async () => {
+  const user = userEvent.setup();
+  render(<MarketsPage />);
+
+  await waitFor(() => {
+    expect(screen.getByText("Robinfun")).toBeInTheDocument();
+  });
+  expect(screen.getByText("$500")).toBeInTheDocument();
+
+  const sortButton = screen.getByRole("button", {
+    name: "Sort by 24-hour volume",
+  });
+  await user.click(sortButton);
+  let rows = screen.getAllByRole("row").slice(1);
+  expect(rows[0]).toHaveTextContent("Robinfun");
+  expect(rows[1]).toHaveTextContent("Latest Token");
+
+  await user.click(sortButton);
+  rows = screen.getAllByRole("row").slice(1);
+  expect(rows[0]).toHaveTextContent("Latest Token");
+  expect(rows[1]).toHaveTextContent("Robinfun");
 });

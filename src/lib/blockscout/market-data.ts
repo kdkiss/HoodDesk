@@ -21,6 +21,7 @@ const tokenMarketSchema = z.object({
   total_supply: z.string().nullable().optional(),
   exchange_rate: z.string().nullable().optional(),
   circulating_market_cap: z.string().nullable().optional(),
+  volume_24h: z.string().nullable().optional(),
 });
 
 const networkStatsSchema = z.object({
@@ -130,6 +131,13 @@ function finiteNumber(value: string | null | undefined): number | null {
   return Number.isFinite(number) ? number : null;
 }
 
+function nonNegativeFiniteNumber(
+  value: string | null | undefined
+): number | null {
+  const number = finiteNumber(value);
+  return number !== null && number >= 0 ? number : null;
+}
+
 function positiveInteger(value: string | null | undefined): number | null {
   if (!value || !/^\d+$/.test(value)) return null;
   const number = Number(value);
@@ -141,21 +149,28 @@ export interface BlockscoutTokenMarketData {
   totalSupplyRaw: string | null;
   priceUsd: number | null;
   marketCapUsd: number | null;
+  volume24hUsd: number | null;
 }
 
 export function getBlockscoutTokenMarketData(
-  tokenAddress: string
+  tokenAddress: string,
+  options?: { timeoutMs?: number }
 ): Promise<BlockscoutTokenMarketData> {
   const address = tokenAddress.toLowerCase();
   return cached(`token-market:${address}`, MARKET_TTL_MS, async () => {
     const result = tokenMarketSchema.parse(
-      await blockscoutGet<unknown>(`/tokens/${address}`)
+      await blockscoutGet<unknown>(
+        `/tokens/${address}`,
+        undefined,
+        options
+      )
     );
     return {
       holdersCount: positiveInteger(result.holders_count),
       totalSupplyRaw: result.total_supply ?? null,
       priceUsd: finiteNumber(result.exchange_rate),
       marketCapUsd: finiteNumber(result.circulating_market_cap),
+      volume24hUsd: nonNegativeFiniteNumber(result.volume_24h),
     };
   });
 }

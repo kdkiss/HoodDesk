@@ -7,6 +7,7 @@ import { getDefaultDex } from "../registry";
 import type { SwapQuote, SwapRoute, TokenInfo, LiquidityPool } from "../types";
 import { isAllowlistedContract } from "../allowlist";
 import { retryRpcRead } from "@/src/lib/chain/retry";
+import { calculateConstantProductPriceImpactBps } from "../price-impact";
 
 export class RobinFunV2Adapter {
   id = "robinfun-v2";
@@ -89,7 +90,10 @@ export class RobinFunV2Adapter {
     };
   }
 
-  async getPairReserves(pair: Address): Promise<LiquidityPool> {
+  async getPairReserves(
+    pair: Address,
+    blockNumber?: bigint
+  ): Promise<LiquidityPool> {
     const [{ token0, token1 }, reserves] = await Promise.all([
       this.getPairTokens(pair),
       retryRpcRead(() =>
@@ -109,6 +113,7 @@ export class RobinFunV2Adapter {
             },
           ] as const,
           functionName: "getReserves",
+          blockNumber,
         })
       ),
     ]);
@@ -125,12 +130,17 @@ export class RobinFunV2Adapter {
     };
   }
 
-  async getAmountsOut(amountIn: bigint, path: Address[]): Promise<bigint[]> {
+  async getAmountsOut(
+    amountIn: bigint,
+    path: Address[],
+    blockNumber?: bigint
+  ): Promise<bigint[]> {
     const result = await this.client.readContract({
       address: this.dex.routerAddress!,
       abi: UNISWAP_V2_ROUTER_ABI,
       functionName: "getAmountsOut",
       args: [amountIn, path],
+      blockNumber,
     });
     return result as bigint[];
   }
@@ -146,16 +156,52 @@ export class RobinFunV2Adapter {
       throw new Error("Router not allowlisted");
     }
 
+    const weth = this.dex.wethAddress.toLowerCase();
+    const tokenInLower = tokenIn.toLowerCase();
+    const tokenOutLower = tokenOut.toLowerCase();
+    if (tokenInLower !== weth && tokenOutLower !== weth) {
+      throw new Error("V2 quotes require a wrapped-native token route");
+    }
+
+    const token = tokenInLower === weth ? tokenOut : tokenIn;
+    const blockNumber = await this.client.getBlockNumber();
+    const pair = (await this.client.readContract({
+      address: token,
+      abi: ROBINFUN_TOKEN_ABI,
+      functionName: "pair",
+      blockNumber,
+    })) as Address;
     const path: Address[] = [tokenIn, tokenOut];
-    const amounts = await this.getAmountsOut(amountIn, path);
+    const [amounts, pool] = await Promise.all([
+      this.getAmountsOut(amountIn, path, blockNumber),
+      this.getPairReserves(pair, blockNumber),
+    ]);
     const expectedOut = amounts[amounts.length - 1];
     const minOut = (expectedOut * BigInt(10000 - slippageBps)) / 10000n;
 
     const price = Number(formatEther(amountIn)) / Number(formatEther(expectedOut));
+    const inputIsToken0 = pool.token0.toLowerCase() === tokenInLower;
+    const inputIsToken1 = pool.token1.toLowerCase() === tokenInLower;
+    const outputMatchesPool =
+      pool.token0.toLowerCase() === tokenOutLower ||
+      pool.token1.toLowerCase() === tokenOutLower;
+    if ((!inputIsToken0 && !inputIsToken1) || !outputMatchesPool) {
+      throw new Error("V2 pair does not match the requested route");
+    }
+    const reserveIn = inputIsToken0 ? pool.reserve0 : pool.reserve1;
+    const reserveOut = inputIsToken0 ? pool.reserve1 : pool.reserve0;
+    const estimatedPriceImpactBps =
+      calculateConstantProductPriceImpactBps({
+        amountIn,
+        expectedAmountOut: expectedOut,
+        reserveIn,
+        reserveOut,
+      });
 
     const route: SwapRoute = {
       kind: "v2",
       path,
+      poolAddress: pair,
       routerAddress: this.dex.routerAddress,
       factoryAddress: this.dex.factoryAddress,
     };
@@ -168,10 +214,11 @@ export class RobinFunV2Adapter {
       minimumAmountOut: minOut,
       displayPrice: price.toString(),
       inversePrice: (1 / price).toString(),
-      estimatedPriceImpactBps: 0, // TODO: calculate from reserves
+      estimatedPriceImpactBps,
       route,
       approvalTarget: this.dex.routerAddress,
       expiresAt: Math.floor(Date.now() / 1000) + 30,
+      blockNumber,
     };
   }
 

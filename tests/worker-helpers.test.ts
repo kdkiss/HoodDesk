@@ -15,15 +15,22 @@ const prismaMock = vi.hoisted(() => ({
 }));
 
 const processOrderMock = vi.hoisted(() => vi.fn());
+const blockscoutMarketMock = vi.hoisted(() => ({
+  getBlockscoutTokenMarketData: vi.fn(),
+}));
 
 vi.mock("@/src/lib/db", () => ({ prisma: prismaMock }));
 vi.mock("../worker/index", () => ({ processOrder: processOrderMock }));
+vi.mock("@/src/lib/blockscout/market-data", () => blockscoutMarketMock);
 
 const address = "0x1111111111111111111111111111111111111111" as const;
 const token = "0x2222222222222222222222222222222222222222" as const;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  blockscoutMarketMock.getBlockscoutTokenMarketData.mockResolvedValue({
+    volume24hUsd: 123.45,
+  });
   process.env.NEXT_PUBLIC_CHAIN_ID = "4663";
 });
 
@@ -102,7 +109,11 @@ describe("runTokenDiscovery", () => {
     const { runTokenDiscovery } = await import("../worker/token-discovery");
 
     await runTokenDiscovery(client as never, 4663);
-    expect(prismaMock.tokenMetadata.upsert).toHaveBeenCalled();
+    expect(prismaMock.tokenMetadata.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ volume24hUsd: "123.45" }),
+      })
+    );
   });
 
   it("continues when factory enumeration fails", async () => {

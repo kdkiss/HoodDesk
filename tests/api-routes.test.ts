@@ -134,6 +134,37 @@ describe("quote API", () => {
     expect(res.status).toBe(200);
     expect((await json(res)).quote).toMatchObject({ amountIn: "100", expectedAmountOut: "200" });
   });
+
+  it("rejects quotes above the deployment price-impact limit", async () => {
+    dexMock.getSwapQuote.mockResolvedValue({
+      tokenIn: validTokenIn,
+      tokenOut: validTokenOut,
+      amountIn: 100n,
+      expectedAmountOut: 20n,
+      minimumAmountOut: 19n,
+      displayPrice: "5",
+      inversePrice: "0.2",
+      estimatedPriceImpactBps: 801,
+      route: {
+        kind: "v2",
+        path: [validTokenIn, validTokenOut],
+        factoryAddress: validOwner,
+        routerAddress: validOwner,
+      },
+      approvalTarget: validOwner,
+      expiresAt: 123,
+    });
+    const { POST } = await import("../app/api/quote/route");
+    const res = await POST(req("http://test/api/quote", {
+      tokenIn: validTokenIn,
+      tokenOut: validTokenOut,
+      amountIn: "100",
+      slippageBps: 50,
+    }));
+
+    expect(res.status).toBe(422);
+    expect((await json(res)).error).toContain("Price impact too high");
+  });
 });
 
 describe("curve API", () => {

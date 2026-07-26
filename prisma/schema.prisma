@@ -111,6 +111,7 @@ model TokenMetadata {
   dexLive        Boolean  @default(false)
   pairAddress    String?
   exchangeRate   String?
+  volume24hUsd   String?
   holdersCount   Int?
   totalSupply    String?
   factoryAddress String?

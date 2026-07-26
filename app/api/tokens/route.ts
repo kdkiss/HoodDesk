@@ -9,6 +9,7 @@ import {
   getLivePriceEth,
   getPriceChanges24h,
 } from "@/src/lib/market-price";
+import { getBlockscoutTokenMarketData } from "@/src/lib/blockscout/market-data";
 
 const querySchema = z.object({
   address: z.string().optional(),
@@ -21,9 +22,17 @@ type MarketToken = Awaited<ReturnType<typeof prisma.tokenMetadata.findFirst>>;
 async function addLivePrices<T extends NonNullable<MarketToken>>(
   tokens: T[]
 ): Promise<
-  Array<T & { priceEth: string | null; change24hPct: number | null }>
+  Array<
+    T & {
+      priceEth: string | null;
+      change24hPct: number | null;
+      volume24hUsd: number | null;
+    }
+  >
 > {
-  const results: Array<T & { priceEth: string | null }> = [];
+  const results: Array<
+    T & { priceEth: string | null; volume24hUsd: number | null }
+  > = [];
   const concurrency = 8;
   let cursor = 0;
 
@@ -36,7 +45,18 @@ async function addLivePrices<T extends NonNullable<MarketToken>>(
         token.dexLive,
         token.pairAddress
       );
-      results[index] = { ...token, priceEth };
+      const parsedVolume = Number(token.volume24hUsd);
+      results[index] = {
+        ...token,
+        priceEth,
+        volume24hUsd:
+          token.volume24hUsd !== null &&
+          token.volume24hUsd !== undefined &&
+          Number.isFinite(parsedVolume) &&
+          parsedVolume >= 0
+            ? parsedVolume
+            : null,
+      };
     }
   }
 
@@ -77,7 +97,15 @@ export async function GET(req: NextRequest) {
         });
       }
 
-      const token = await getTokenInfo(address as Address);
+      const [token, indexedMarket] = await Promise.all([
+        getTokenInfo(address as Address),
+        getBlockscoutTokenMarketData(address).catch(() => null),
+      ]);
+      const volume24hUsd =
+        indexedMarket?.volume24hUsd === null ||
+        indexedMarket?.volume24hUsd === undefined
+          ? undefined
+          : String(indexedMarket.volume24hUsd);
 
       // Cache in DB
       const stored = await prisma.tokenMetadata.upsert({
@@ -90,6 +118,7 @@ export async function GET(req: NextRequest) {
           isRobinFun: token.isRobinFun,
           dexLive: token.dexLive,
           pairAddress: token.pairAddress,
+          volume24hUsd,
         },
         create: {
           address: token.address.toLowerCase(),
@@ -101,6 +130,7 @@ export async function GET(req: NextRequest) {
           isRobinFun: token.isRobinFun,
           dexLive: token.dexLive,
           pairAddress: token.pairAddress,
+          volume24hUsd,
         },
       });
 

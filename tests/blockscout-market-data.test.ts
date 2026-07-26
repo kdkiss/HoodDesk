@@ -24,6 +24,7 @@ describe("Blockscout market data", () => {
       total_supply: "1000000000000000000000000000",
       exchange_rate: "0.00013224",
       circulating_market_cap: "132238.81",
+      volume_24h: "3667.255432409726",
     });
 
     const result = await getBlockscoutTokenMarketData(
@@ -35,7 +36,25 @@ describe("Blockscout market data", () => {
       totalSupplyRaw: "1000000000000000000000000000",
       priceUsd: 0.00013224,
       marketCapUsd: 132238.81,
+      volume24hUsd: 3667.255432409726,
     });
+  });
+
+  it("rejects invalid indexed volume without discarding other fields", async () => {
+    blockscoutMock.blockscoutGet.mockResolvedValue({
+      holders_count: "10",
+      total_supply: "1000",
+      exchange_rate: "0.5",
+      circulating_market_cap: "500",
+      volume_24h: "-1",
+    });
+
+    const result = await getBlockscoutTokenMarketData(
+      "0x5555555555555555555555555555555555555555"
+    );
+
+    expect(result.volume24hUsd).toBeNull();
+    expect(result.holdersCount).toBe(10);
   });
 
   it("parses decoded V2 Swap logs without RPC block lookups", async () => {

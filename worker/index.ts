@@ -7,6 +7,10 @@ import { ERC20_ABI } from "../src/lib/dex/abi/erc20";
 import { ROBINFUN_FACTORIES, DEX_ROUTER, WETH } from "../src/config/contracts";
 import { getChain } from "../src/config/chains";
 import { priceEthPerTokenFromReserves } from "../src/lib/price-units";
+import {
+  assertPriceImpactWithinLimit,
+  calculateConstantProductPriceImpactBps,
+} from "../src/lib/dex/price-impact";
 import { runTokenDiscovery } from "./token-discovery";
 
 const EXECUTION_ENABLED = process.env.EXECUTION_ENABLED === "true";
@@ -173,6 +177,13 @@ export async function processOrder(order: {
   if (!Number.isInteger(maxSlippageBps) || order.maximumSlippageBps > maxSlippageBps) {
     throw new Error("Order exceeds the configured maximum slippage");
   }
+  const maxPriceImpactBps = Number(process.env.MAX_PRICE_IMPACT_BPS ?? 800);
+  if (
+    !Number.isInteger(maxPriceImpactBps) ||
+    order.maximumPriceImpactBps > maxPriceImpactBps
+  ) {
+    throw new Error("Order exceeds the configured maximum price impact");
+  }
 
   const minGasBalance = parseEther(process.env.EXECUTION_MIN_GAS_BALANCE_ETH ?? "0.005");
   const executionBalance = await publicClient.getBalance({ address: account.address });
@@ -214,11 +225,15 @@ export async function processOrder(order: {
 
   const graduated = curve[8]; // graduated bool
   let currentPrice: bigint;
+  let v2PricingBlock: bigint | null = null;
+  let v2ReserveIn: bigint | null = null;
+  let v2ReserveOut: bigint | null = null;
 
   if (graduated) {
     const pairAddress = meta?.pairAddress;
     if (!pairAddress) throw new Error("Graduated token is missing pair address");
 
+    v2PricingBlock = await publicClient.getBlockNumber();
     const [token0, reserves] = await Promise.all([
       publicClient.readContract({
         address: pairAddress as Address,
@@ -232,6 +247,7 @@ export async function processOrder(order: {
           },
         ] as const,
         functionName: "token0",
+        blockNumber: v2PricingBlock,
       }),
       publicClient.readContract({
         address: pairAddress as Address,
@@ -249,6 +265,7 @@ export async function processOrder(order: {
           },
         ] as const,
         functionName: "getReserves",
+        blockNumber: v2PricingBlock,
       }),
     ]);
     const [reserve0, reserve1] = reserves as [bigint, bigint, number];
@@ -258,6 +275,8 @@ export async function processOrder(order: {
     const price = priceEthPerTokenFromReserves(wethReserve, tokenReserve);
     if (price === null) throw new Error("Graduated token has no token liquidity");
     currentPrice = price;
+    v2ReserveIn = isBuy ? wethReserve : tokenReserve;
+    v2ReserveOut = isBuy ? tokenReserve : wethReserve;
   } else {
     // Get price from curve
     currentPrice = await publicClient.readContract({
@@ -278,6 +297,36 @@ export async function processOrder(order: {
     return { result: "not-triggered" }; // still ARMED, check again next poll
   }
 
+  let v2ExpectedOut: bigint | null = null;
+  if (graduated) {
+    if (
+      v2PricingBlock === null ||
+      v2ReserveIn === null ||
+      v2ReserveOut === null
+    ) {
+      throw new Error("V2 pricing state is unavailable");
+    }
+    const path = [tokenIn, tokenOut];
+    const amounts = await publicClient.readContract({
+      address: DEX_ROUTER,
+      abi: UNISWAP_V2_ROUTER_ABI,
+      functionName: "getAmountsOut",
+      args: [amountIn, path],
+      blockNumber: v2PricingBlock,
+    });
+    v2ExpectedOut = amounts[amounts.length - 1];
+    const priceImpactBps = calculateConstantProductPriceImpactBps({
+      amountIn,
+      expectedAmountOut: v2ExpectedOut,
+      reserveIn: v2ReserveIn,
+      reserveOut: v2ReserveOut,
+    });
+    assertPriceImpactWithinLimit(
+      priceImpactBps,
+      order.maximumPriceImpactBps
+    );
+  }
+
   // Trigger met — lock the order
   await prisma.automatedOrder.update({
     where: { id: order.id },
@@ -293,13 +342,8 @@ export async function processOrder(order: {
   if (graduated) {
     // V2 swap
     const path = [tokenIn, tokenOut];
-    const amounts = await publicClient.readContract({
-      address: DEX_ROUTER,
-      abi: UNISWAP_V2_ROUTER_ABI,
-      functionName: "getAmountsOut",
-      args: [amountIn, path],
-    });
-    const expectedOut = amounts[amounts.length - 1];
+    if (v2ExpectedOut === null) throw new Error("V2 quote is unavailable");
+    const expectedOut = v2ExpectedOut;
     // Safety buffer: Ensure at least 500 bps (5%) slippage for automated execution to handle Fee-on-Transfer tokens
     const appliedSlippageBps = Math.max(order.maximumSlippageBps, 500);
     const minOut = (expectedOut * BigInt(10000 - appliedSlippageBps)) / 10000n;
