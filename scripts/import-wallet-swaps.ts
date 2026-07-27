@@ -10,6 +10,7 @@ try {
 interface BlockscoutTransaction {
   hash: string;
   status: string;
+  method: string | null;
   from: { hash: string };
   to: { hash: string } | null;
 }
@@ -28,13 +29,13 @@ async function main() {
   const [
     { prisma },
     { blockscoutGet },
-    { DEX_ROUTER, isRobinFunFactory },
     { verifySwapTransaction },
+    { verifyExternalWalletSwapTransaction },
   ] = await Promise.all([
     import("../src/lib/db"),
     import("../src/lib/blockscout/client"),
-    import("../src/config/contracts"),
     import("../src/lib/portfolio/verified-swap"),
+    import("../src/lib/portfolio/verified-external-swap"),
   ]);
 
   const requested = requestedAddress();
@@ -50,6 +51,9 @@ async function main() {
   let imported = 0;
   let alreadyKnown = 0;
   let unsupported = 0;
+  let creditsRemaining: number | null = null;
+  const hasProKey =
+    process.env.BLOCKSCOUT_API_KEY?.startsWith("proapi_") === true;
 
   for (const walletRow of walletRows) {
     const walletAddress = walletRow.executionWallet.toLowerCase();
@@ -67,8 +71,9 @@ async function main() {
           item.status !== "ok" ||
           item.from.hash.toLowerCase() !== walletAddress ||
           !target ||
-          (target.toLowerCase() !== DEX_ROUTER.toLowerCase() &&
-            !isRobinFunFactory(target))
+          item.method === "approve" ||
+          item.method === "transfer" ||
+          item.method === "deposit"
         ) {
           continue;
         }
@@ -76,6 +81,11 @@ async function main() {
       }
 
       if (!response.next_page_params) break;
+      if (page === 19) {
+        throw new Error(
+          `Wallet ${walletAddress} transaction history exceeds the import page limit`
+        );
+      }
       pageParams = Object.fromEntries(
         Object.entries(response.next_page_params).map(([key, value]) => [
           key,
@@ -91,7 +101,15 @@ async function main() {
         select: { transactionHash: true },
       }),
       prisma.orderExecution.findMany({
-        where: { transactionHash: { in: uniqueHashes } },
+        where: {
+          transactionHash: { in: uniqueHashes },
+          actualTokenAmount: { not: null },
+          actualEthAmount: { not: null },
+          order: {
+            executionWallet: walletAddress,
+            chainId: walletRow.chainId,
+          },
+        },
         select: { transactionHash: true },
       }),
     ]);
@@ -108,10 +126,27 @@ async function main() {
       }
 
       try {
-        const verified = await verifySwapTransaction({
-          chainId: walletRow.chainId,
-          transactionHash,
-        });
+        let verified;
+        let source: string;
+        let targetContract: string | undefined;
+        try {
+          verified = await verifySwapTransaction({
+            chainId: walletRow.chainId,
+            transactionHash,
+          });
+          source = "verified_receipt_import";
+        } catch (directError) {
+          if (!hasProKey) throw directError;
+          const external = await verifyExternalWalletSwapTransaction({
+            chainId: walletRow.chainId,
+            transactionHash,
+            expectedWalletAddress: walletAddress as `0x${string}`,
+          });
+          verified = external;
+          source = "verified_state_change_import";
+          targetContract = external.targetContract;
+          creditsRemaining = external.creditsRemaining;
+        }
         if (verified.walletAddress.toLowerCase() !== walletAddress) {
           throw new Error("Verified sender does not match imported wallet");
         }
@@ -120,7 +155,8 @@ async function main() {
           tokenAmount: verified.tokenAmount.toString(),
           ethAmount: verified.ethAmount.toString(),
           timestampMs: verified.blockTimestampMs.toString(),
-          source: "verified_receipt_import",
+          source,
+          ...(targetContract ? { targetContract } : {}),
         };
         await prisma.trackedTransaction.upsert({
           where: { transactionHash },
@@ -158,7 +194,11 @@ async function main() {
   }
 
   console.log(
-    `Import complete: ${imported} imported, ${alreadyKnown} already tracked, ${unsupported} unsupported`
+    `Import complete: ${imported} imported, ${alreadyKnown} already tracked, ${unsupported} unsupported${
+      creditsRemaining === null
+        ? ""
+        : `, ${creditsRemaining} Blockscout credits remaining`
+    }`
   );
   await prisma.$disconnect();
 }

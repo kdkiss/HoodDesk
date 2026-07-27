@@ -108,6 +108,70 @@ export async function blockscoutRpcGet<T>(
   }
 }
 
+export interface BlockscoutProResult<T> {
+  data: T;
+  creditsRemaining: number | null;
+}
+
+async function blockscoutProRequest<T>(
+  chainId: number,
+  path: string,
+  params?: Record<string, string>,
+  opts?: BlockscoutRequestOptions
+): Promise<BlockscoutProResult<T>> {
+  if (!API_KEY.startsWith("proapi_")) {
+    throw new Error("BLOCKSCOUT_API_KEY is not configured with a PRO API key");
+  }
+  const url = new URL(`${PRO_API_BASE}/${chainId}${path}`);
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  }
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      opts?.timeoutMs ?? 15_000
+    );
+    try {
+      const res = await fetch(url.toString(), {
+        headers: {
+          "User-Agent": "HoodDesk/0.1.0",
+          Accept: "application/json",
+          Authorization: `Bearer ${API_KEY}`,
+        },
+        signal: controller.signal,
+      });
+
+      if (res.ok) {
+        const creditsHeader = res.headers.get("x-credits-remaining");
+        const creditsRemaining =
+          creditsHeader !== null && Number.isFinite(Number(creditsHeader))
+            ? Number(creditsHeader)
+            : null;
+        return {
+          data: (await res.json()) as T,
+          creditsRemaining,
+        };
+      }
+
+      const error = await httpError("Blockscout PRO", res);
+      const retryable = error.status === 429 || error.status >= 500;
+      if (!retryable || attempt === 3) throw error;
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          Math.min(error.retryAfterMs ?? attempt * 1000, 10_000)
+        )
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw new Error("Blockscout PRO request exhausted all attempts");
+}
+
 // Blockscout PRO API (api.blockscout.com) for enriched data
 export async function blockscoutProGet<T>(
   chainId: number,
@@ -115,30 +179,14 @@ export async function blockscoutProGet<T>(
   params?: Record<string, string>,
   opts?: BlockscoutRequestOptions
 ): Promise<T> {
-  const url = new URL(`${PRO_API_BASE}/${chainId}${path}`);
-  if (params) {
-    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  }
+  return (await blockscoutProRequest<T>(chainId, path, params, opts)).data;
+}
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 15_000);
-
-  try {
-    const res = await fetch(url.toString(), {
-      headers: {
-        "User-Agent": "HoodDesk/0.1.0",
-        Accept: "application/json",
-        Authorization: `Bearer ${API_KEY}`,
-      },
-      signal: controller.signal,
-    });
-
-    if (!res.ok) {
-      throw await httpError("Blockscout PRO", res);
-    }
-
-    return (await res.json()) as T;
-  } finally {
-    clearTimeout(timeout);
-  }
+export async function blockscoutProGetWithMeta<T>(
+  chainId: number,
+  path: string,
+  params?: Record<string, string>,
+  opts?: BlockscoutRequestOptions
+): Promise<BlockscoutProResult<T>> {
+  return blockscoutProRequest<T>(chainId, path, params, opts);
 }
