@@ -6,6 +6,7 @@ const prismaMock = vi.hoisted(() => ({
     update: vi.fn(),
   },
   orderEvent: {
+    findFirst: vi.fn(),
     create: vi.fn(),
   },
   tokenMetadata: {
@@ -31,6 +32,7 @@ beforeEach(() => {
   blockscoutMarketMock.getBlockscoutTokenMarketData.mockResolvedValue({
     volume24hUsd: 123.45,
   });
+  prismaMock.orderEvent.findFirst.mockResolvedValue(null);
   process.env.NEXT_PUBLIC_CHAIN_ID = "4663";
 });
 
@@ -85,8 +87,30 @@ describe("processDcaOrders", () => {
     const { processDcaOrders } = await import("../worker/dca");
 
     await processDcaOrders();
+    expect(prismaMock.automatedOrder.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "dca-fail" },
+      data: expect.objectContaining({ status: "FAILED" }),
+    }));
     expect(prismaMock.orderEvent.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ eventType: "FAILED", message: "DCA iteration failed: boom" }),
+      data: expect.objectContaining({ eventType: "FAILED", message: "Order failed: boom" }),
+    }));
+  });
+
+  it("preserves DCA state after transient RPC failures", async () => {
+    processOrderMock.mockRejectedValue(new Error("HTTP request failed.\nDetails: fetch failed"));
+    prismaMock.automatedOrder.findMany.mockResolvedValue([
+      {
+        id: "dca-rpc",
+        metadata: { totalIterations: 2, currentIteration: 0, startAt: "2000-01-01T00:00:00.000Z" },
+        orderSubtype: "MONTHLY",
+      },
+    ]);
+    const { processDcaOrders } = await import("../worker/dca");
+
+    await processDcaOrders();
+    expect(prismaMock.automatedOrder.update).not.toHaveBeenCalled();
+    expect(prismaMock.orderEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ eventType: "RPC_DEFERRED" }),
     }));
   });
 });

@@ -13,6 +13,13 @@ import {
 } from "../src/lib/dex/price-impact";
 import { deriveSwapAmounts } from "../src/lib/portfolio/swap-receipt";
 import { runTokenDiscovery } from "./token-discovery";
+import { safeErrorMessage } from "./error-message";
+import { handleOrderProcessingError } from "./order-failure";
+import {
+  resolveWorkerRpcUrl,
+  RPC_READ_TRANSPORT_OPTIONS,
+  RPC_WRITE_TRANSPORT_OPTIONS,
+} from "./rpc-config";
 
 const EXECUTION_ENABLED = process.env.EXECUTION_ENABLED === "true";
 const AUTOMATED_ORDERS_ENABLED = process.env.AUTOMATED_ORDERS_ENABLED === "true";
@@ -27,12 +34,13 @@ const TOKEN_DISCOVERY_INTERVAL_MS = Number(process.env.TOKEN_DISCOVERY_INTERVAL_
 
 const chainId = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 4663);
 const chain = getChain(chainId);
+const rpcUrl = resolveWorkerRpcUrl(chain.rpcUrl);
 
 const viemChain = {
   id: chain.id,
   name: chain.name,
   nativeCurrency: chain.nativeCurrency,
-  rpcUrls: { default: { http: [chain.rpcUrl] } },
+  rpcUrls: { default: { http: [rpcUrl] } },
 } as const;
 
 // Transports retry transient RPC failures (429 rate-limit, timeouts) with
@@ -40,7 +48,7 @@ const viemChain = {
 // retries a single 429 kills an order iteration.
 const publicClient = createPublicClient({
   chain: viemChain,
-  transport: http(chain.rpcUrl, { retryCount: 3, retryDelay: 1000 }),
+  transport: http(rpcUrl, RPC_READ_TRANSPORT_OPTIONS),
 });
 
 let walletClient: ReturnType<typeof createWalletClient> | null = null;
@@ -51,7 +59,7 @@ if (PRIVATE_KEY) {
   walletClient = createWalletClient({
     account,
     chain: viemChain,
-    transport: http(chain.rpcUrl, { retryCount: 3, retryDelay: 1000 }),
+    transport: http(rpcUrl, RPC_WRITE_TRANSPORT_OPTIONS),
   });
 }
 
@@ -92,7 +100,7 @@ async function main() {
     try {
       await processOrders();
     } catch (err) {
-      console.error("Worker loop error:", err);
+      console.error(`Worker loop error: ${safeErrorMessage(err)}`);
     }
     await sleep(POLL_INTERVAL);
   }
@@ -104,7 +112,7 @@ async function runTokenDiscoveryLoop() {
     try {
       await runTokenDiscovery(publicClient, chainId);
     } catch (err) {
-      console.error("Token discovery loop error:", err);
+      console.error(`Token discovery loop error: ${safeErrorMessage(err)}`);
     }
     await sleep(TOKEN_DISCOVERY_INTERVAL_MS);
   }
@@ -137,14 +145,7 @@ async function processOrders() {
         });
       }
     } catch (err) {
-      console.error(`Failed to process order ${order.id}:`, err);
-      await prisma.automatedOrder.update({
-        where: { id: order.id },
-        data: {
-          status: "FAILED",
-          failureReason: err instanceof Error ? err.message : "Unknown error",
-        },
-      });
+      await handleOrderProcessingError(order.id, err);
     }
   }
 
@@ -560,4 +561,6 @@ async function keepWorkerHealthy() {
   while (true) await sleep(60_000);
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(`Worker terminated: ${safeErrorMessage(error)}`);
+});

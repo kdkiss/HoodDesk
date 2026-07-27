@@ -4,6 +4,7 @@ import { ROBINFUN_FACTORY_ABI } from "../src/lib/dex/abi/robinfun-factory";
 import { ROBINFUN_TOKEN_ABI } from "../src/lib/dex/abi/robinfun-token";
 import { ROBINFUN_FACTORIES } from "../src/config/contracts";
 import { getBlockscoutTokenMarketData } from "../src/lib/blockscout/market-data";
+import { safeErrorMessage } from "./error-message";
 
 // Concurrency cap for onchain reads during enumeration/metadata fetch.
 // Robinhood Chain RPC has not been load-tested for burst eth_call volume,
@@ -42,7 +43,7 @@ async function mapWithConcurrency<T, R>(
       try {
         results[index] = await fn(items[index], index);
       } catch (err) {
-        console.error(`[token-discovery] item ${index} failed:`, err instanceof Error ? err.message : err);
+        console.error(`[token-discovery] item ${index} failed: ${safeErrorMessage(err)}`);
         results[index] = undefined;
       }
     }
@@ -167,7 +168,9 @@ async function upsertTokenMetadata(
       })) as Address;
       pairAddress = pair;
     } catch (err) {
-      console.error(`[token-discovery] failed to read pair() for ${token}:`, err instanceof Error ? err.message : err);
+      console.error(
+        `[token-discovery] failed to read pair() for ${token}: ${safeErrorMessage(err)}`
+      );
     }
   }
 
@@ -221,7 +224,9 @@ export async function runTokenDiscovery(client: PublicClient, chainId: number): 
     try {
       tokens = await enumerateFactoryTokens(client, factory);
     } catch (err) {
-      console.error(`[token-discovery] failed to enumerate factory ${factory}:`, err instanceof Error ? err.message : err);
+      console.error(
+        `[token-discovery] failed to enumerate factory ${factory}: ${safeErrorMessage(err)}`
+      );
       continue;
     }
 
@@ -234,7 +239,9 @@ export async function runTokenDiscovery(client: PublicClient, chainId: number): 
         upserted++;
       } catch (err) {
         failed++;
-        console.error(`[token-discovery] skipping token ${token} (factory ${factory}):`, err instanceof Error ? err.message : err);
+        console.error(
+          `[token-discovery] skipping token ${token} (factory ${factory}): ${safeErrorMessage(err)}`
+        );
       }
     });
   }

@@ -28,7 +28,7 @@ export async function retryRpcRead<T>(
   throw lastError;
 }
 
-function isTransientRpcError(error: unknown): boolean {
+export function isTransientRpcError(error: unknown): boolean {
   if (error instanceof DOMException && error.name === "AbortError") return true;
   if (!(error instanceof Error)) return false;
 

@@ -1,5 +1,6 @@
 import { prisma } from "@/src/lib/db";
 
+import { handleOrderProcessingError } from "./order-failure";
 import { processOrder } from "./index";
 
 /**
@@ -112,20 +113,7 @@ export async function processDcaOrders() {
         },
       });
     } catch (err) {
-      console.error(`DCA order ${order.id} iteration failed:`, err);
-      // Re-arm so a transient failure (RPC 429, network error) doesn't strand
-      // the order in EXECUTING forever — the iteration retries next poll.
-      await prisma.automatedOrder.update({
-        where: { id: order.id },
-        data: { status: "ARMED" },
-      });
-      await prisma.orderEvent.create({
-        data: {
-          orderId: order.id,
-          eventType: "FAILED",
-          message: `DCA iteration failed: ${err instanceof Error ? err.message : String(err)}`,
-        },
-      });
+      await handleOrderProcessingError(order.id, err);
     }
   }
 }
