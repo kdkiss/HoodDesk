@@ -1,5 +1,6 @@
 const DEFAULT_ATTEMPTS = 3;
 const DEFAULT_DELAY_MS = 200;
+const MAX_ERROR_CAUSE_DEPTH = 8;
 
 /**
  * Retry a read-only RPC operation that can safely be repeated.
@@ -29,13 +30,36 @@ export async function retryRpcRead<T>(
 }
 
 export function isTransientRpcError(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === "AbortError") return true;
-  if (!(error instanceof Error)) return false;
+  const seen = new Set<object>();
+  let current: unknown = error;
 
+  for (let depth = 0; current != null && depth < MAX_ERROR_CAUSE_DEPTH; depth += 1) {
+    if (isTransientErrorNode(current)) return true;
+    if (typeof current !== "object" || seen.has(current)) break;
+
+    seen.add(current);
+    current = "cause" in current ? current.cause : undefined;
+  }
+
+  return false;
+}
+
+function isTransientErrorNode(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  if (typeof error !== "object" || error === null) return false;
+
+  const message =
+    "message" in error && typeof error.message === "string" ? error.message : "";
+  const code =
+    "code" in error && (typeof error.code === "string" || typeof error.code === "number")
+      ? String(error.code)
+      : "";
   return (
-    /\b(?:408|425|429|5\d\d)\b/.test(error.message) ||
+    /\b(?:408|425|429|5\d\d)\b/.test(message) ||
     /fetch failed|network|socket|econnreset|econnrefused|etimedout|timeout|temporar(?:y|ily)/i.test(
-      error.message
-    )
+      message
+    ) ||
+    /metadata is not found|missing trie node|state .* is not available/i.test(message) ||
+    /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|UND_ERR_)/i.test(code)
   );
 }

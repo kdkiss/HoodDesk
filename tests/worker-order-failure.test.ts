@@ -19,15 +19,9 @@ beforeEach(() => {
 describe("handleOrderProcessingError", () => {
   it("preserves order state after the transient RPC failure from the incident", async () => {
     const { handleOrderProcessingError } = await import("../worker/order-failure");
-    const error = new Error(
-      [
-        "HTTP request failed.",
-        "",
-        "URL: https://provider.example/v2/secret-key",
-        'Request body: {"method":"eth_getBalance","params":[]}',
-        "Details: fetch failed",
-      ].join("\n")
-    );
+    const error = new Error("HTTP request failed.", {
+      cause: new TypeError("fetch failed"),
+    });
 
     await expect(
       handleOrderProcessingError("order-1", error, new Date("2026-07-27T12:00:00Z"))
@@ -37,6 +31,30 @@ describe("handleOrderProcessingError", () => {
     expect(prismaMock.orderEvent.create).toHaveBeenCalledWith({
       data: {
         orderId: "order-1",
+        eventType: "RPC_DEFERRED",
+        message: "Order processing deferred after a temporary RPC failure; existing state preserved",
+      },
+    });
+  });
+
+  it("preserves order state when the RPC head state is temporarily unavailable", async () => {
+    const { handleOrderProcessingError } = await import("../worker/order-failure");
+    const providerError = Object.assign(
+      new Error("missing trie node; state is not available"),
+      { code: -32000 }
+    );
+    const error = new Error("Missing or invalid parameters.", {
+      cause: providerError,
+    });
+
+    await expect(
+      handleOrderProcessingError("order-head-state", error)
+    ).resolves.toBe("deferred");
+
+    expect(prismaMock.automatedOrder.update).not.toHaveBeenCalled();
+    expect(prismaMock.orderEvent.create).toHaveBeenCalledWith({
+      data: {
+        orderId: "order-head-state",
         eventType: "RPC_DEFERRED",
         message: "Order processing deferred after a temporary RPC failure; existing state preserved",
       },

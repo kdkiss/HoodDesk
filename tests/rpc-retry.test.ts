@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { retryRpcRead } from "@/src/lib/chain/retry";
+import { isTransientRpcError, retryRpcRead } from "@/src/lib/chain/retry";
 
 describe("retryRpcRead", () => {
   it("retries transient read failures and returns the successful value", async () => {
@@ -34,5 +34,34 @@ describe("retryRpcRead", () => {
       retryRpcRead(operation, { attempts: 3, delayMs: 0 })
     ).rejects.toThrow("execution reverted");
     expect(operation).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("isTransientRpcError", () => {
+  it("detects a transport failure wrapped by Viem", () => {
+    const socketError = Object.assign(new Error("other side closed"), {
+      code: "UND_ERR_SOCKET",
+    });
+    const fetchError = new TypeError("fetch failed", { cause: socketError });
+    const viemError = new Error("HTTP request failed.", { cause: fetchError });
+
+    expect(isTransientRpcError(viemError)).toBe(true);
+  });
+
+  it("detects unavailable block state hidden under a generic RPC message", () => {
+    const providerError = Object.assign(
+      new Error("metadata is not found, 21017729"),
+      { code: -32000 }
+    );
+    const rpcError = new Error("RPC Request failed.", { cause: providerError });
+    const viemError = new Error("Missing or invalid parameters.", {
+      cause: rpcError,
+    });
+
+    expect(isTransientRpcError(viemError)).toBe(true);
+  });
+
+  it("keeps genuinely invalid parameters deterministic", () => {
+    expect(isTransientRpcError(new Error("Missing or invalid parameters."))).toBe(false);
   });
 });
