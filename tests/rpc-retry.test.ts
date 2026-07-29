@@ -64,4 +64,10 @@ describe("isTransientRpcError", () => {
   it("keeps genuinely invalid parameters deterministic", () => {
     expect(isTransientRpcError(new Error("Missing or invalid parameters."))).toBe(false);
   });
+
+  it("detects a Viem TimeoutError by its message text", () => {
+    const timeoutError = new Error("The request took too long to respond.");
+
+    expect(isTransientRpcError(timeoutError)).toBe(true);
+  });
 });

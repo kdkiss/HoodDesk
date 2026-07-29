@@ -56,7 +56,7 @@ function isTransientErrorNode(error: unknown): boolean {
       : "";
   return (
     /\b(?:408|425|429|5\d\d)\b/.test(message) ||
-    /fetch failed|network|socket|econnreset|econnrefused|etimedout|timeout|temporar(?:y|ily)/i.test(
+    /fetch failed|network|socket|econnreset|econnrefused|etimedout|timeout|took too long to respond|temporar(?:y|ily)/i.test(
       message
     ) ||
     /metadata is not found|missing trie node|state .* is not available/i.test(message) ||
